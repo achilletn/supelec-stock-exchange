@@ -6,6 +6,7 @@ let symboleActuel = "";
 let periodeActuelle = "24h";
 let lastTickTime = performance.now();
 let tickCount = 0;
+let prixActuel = 0;
 
 const tickHandlers = new Set();
 const syncClockHandles = {};
@@ -191,6 +192,7 @@ function actualiserTableauMarche() {
                 
                 // 2. NOUVEAU : Si cet actif est celui ouvert dans le détail, on met à jour le prix Spot
                 if (action.symbol === symboleActuel) {
+                    prixActuel = action.price; // <-- Ajout de cette ligne
                     const elPrix = document.getElementById("detail-prix");
                     if (elPrix) {
                         elPrix.innerText = action.price.toLocaleString("fr-FR", { 
@@ -198,6 +200,7 @@ function actualiserTableauMarche() {
                             maximumFractionDigits: 2 
                         }) + " $";
                     }
+                    calculerEstimation(); // <-- Ajout de cette ligne pour actualiser en temps réel
                 }
             });
         })
@@ -378,6 +381,11 @@ function voirDetail(symbol) {
     symboleActuel = symbol;
     document.getElementById("detail-titre").innerText = symbol;
     document.getElementById("trade-message").innerText = "";
+    
+    document.getElementById("trade-quantite").value = ""; 
+    const estEl = document.getElementById("trade-estimation");
+    if(estEl) estEl.style.display = "none"; 
+    
     document.getElementById("panneau-detail").style.display = "block";
     chargerGraphique(symboleActuel, periodeActuelle);
 }
@@ -424,6 +432,7 @@ function chargerGraphique(symbol, periode) {
 
             document.getElementById("detail-prix").innerText = c.prices[c.prices.length - 1].toLocaleString("fr-FR", {minimumFractionDigits: 2}) + " $";
             dessinerGraphique(c.labels, c.prices);
+            calculerEstimation();
         })
         .catch(err => console.error("Erreur graphique:", err));
 }
@@ -493,6 +502,44 @@ function passerOrdre(action) {
             msgBox.style.color = "red";
         });
 }
+
+function calculerEstimation() {
+    const inputEl = document.getElementById("trade-quantite");
+    const estimationEl = document.getElementById("trade-estimation");
+    if (!inputEl || !estimationEl) return;
+
+    const quantite = parseFloat(inputEl.value);
+    if (isNaN(quantite) || quantite <= 0 || prixActuel <= 0) {
+        estimationEl.style.display = "none";
+        return;
+    }
+
+    const volume = quantite * prixActuel;
+    const frais = volume * 0.005; // 0.5%
+    const totalAchat = volume + frais;
+    const totalVente = volume - frais;
+
+    estimationEl.style.display = "block";
+    estimationEl.innerHTML = `
+        <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: #555;">
+            <span>Coût brut :</span> <strong>${volume.toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2})} $</strong>
+        </div>
+        <div style="display: flex; justify-content: space-between; margin-bottom: 8px; color: #e74c3c;">
+            <span>Frais (0.5%) :</span> <strong>${frais.toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2})} $</strong>
+        </div>
+        <div style="border-top: 1px solid #ccc; padding-top: 8px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                <span>Coût Total si <strong style="color:#2ecc71;">Achat</strong> :</span> <strong>-${totalAchat.toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2})} $</strong>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+                <span>Gain Net si <strong style="color:#e74c3c;">Vente</strong> :</span> <strong>+${totalVente.toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2})} $</strong>
+            </div>
+        </div>
+    `;
+}
+
+// Lier l'événement de saisie
+document.getElementById("trade-quantite").addEventListener("input", calculerEstimation);
 
 function lierToucheEntree(idActuel, idSuivant) {
     document.getElementById(idActuel).addEventListener("keydown", e => {

@@ -96,52 +96,70 @@ static bool registerUser(const std::string& user, const std::string& pass, const
 
 void workerActualiserCours() {
     std::vector<std::string> mesActifs = {"BTC/USD", "ETH/USD", "BNB/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "ADA/USD", "AVAX/USD"};
-    std::string apiKey = "8688ffbe4237481cb6bf8b24151439b6";
 
     while (true) {
         try {
-            httplib::Client cli("https://api.twelvedata.com");
+            httplib::Client cli("https://api.binance.com");
             
-            // Construction de la chaîne : "AAPL,MSFT,TSLA,NVDA,GOOGL,AMZN,META,NFLX"
-            std::string symbols = "";
+            // 1. Convertir "BTC/USD" en "BTCUSDT" et construire l'URL Binance
+            // Format attendu dans l'URL : %5B%22BTCUSDT%22%2C%22ETHUSDT%22%5D
+            std::string symbolsEncoded = "%5B";
             for (size_t i = 0; i < mesActifs.size(); ++i) {
-                symbols += mesActifs[i] + (i == mesActifs.size() - 1 ? "" : ",");
+                std::string bSym = mesActifs[i];
+                size_t pos = bSym.find("/USD");
+                if (pos != std::string::npos) {
+                    bSym.replace(pos, 4, "USDT"); // Transforme "BTC/USD" en "BTCUSDT"
+                }
+                
+                symbolsEncoded += "%22" + bSym + "%22";
+                if (i < mesActifs.size() - 1) symbolsEncoded += "%2C";
             }
+            symbolsEncoded += "%5D";
 
-            std::string path = "/quote?symbol=" + symbols + "&apikey=" + apiKey;
+            std::string path = "/api/v3/ticker/24hr?symbols=" + symbolsEncoded;
             auto res = cli.Get(path.c_str());
 
             if (res && res->status == 200) {
                 auto j = json::parse(res->body);
 
-                // Vérification globale du quota dans la réponse
-                if (j.contains("code") && j["code"] == 429) {
-                    std::cout << "[QUOTA] Limite atteinte, pause forcée." << std::endl;
-                } else {
+                if (j.is_array()) {
                     std::lock_guard<std::mutex> lock(marcheMutex);
-                    for (auto it = j.begin(); it != j.end(); ++it) {
-                        std::string sym = it.key();
-                        auto& data = it.value();
+                    
+                    for (const auto& item : j) {
+                        std::string bSymbol = item["symbol"].get<std::string>();
+                        
+                        // 2. Reconvertir "BTCUSDT" en "BTC/USD" pour ton dictionnaire local
+                        std::string sym = bSymbol;
+                        size_t pos = sym.find("USDT");
+                        if (pos != std::string::npos) {
+                            sym.replace(pos, 4, "/USD");
+                        }
 
-                        if (data.is_object() && data.contains("close")) {
-                            double p = std::stod(data["close"].get<std::string>());
+                        // 3. Mettre à jour marcheMondial (traité comme une action)
+                        if (item.contains("lastPrice")) {
+                            double p = std::stod(item["lastPrice"].get<std::string>());
                             marcheMondial[sym].prix = p;
-                            marcheMondial[sym].nom = data.value("name", sym);
                             
-                            if (data.contains("percent_change")) {
-                                marcheMondial[sym].variation_24h = std::stod(data["percent_change"].get<std::string>());
+                            // Binance ne renvoie pas de nom complet ici, on garde le Ticker (ex: "BTC")
+                            marcheMondial[sym].nom = sym.substr(0, sym.find("/"));
+                            
+                            if (item.contains("priceChangePercent")) {
+                                marcheMondial[sym].variation_24h = std::stod(item["priceChangePercent"].get<std::string>());
                             }
                             std::cout << "  [OK] " << sym << " mis à jour." << std::endl;
                         }
                     }
                 }
+            } else if (res) {
+                std::cout << "[ERREUR BINANCE] Code : " << res->status << std::endl;
             }
         } catch (const std::exception& e) {
             std::cout << "  [EXCEPTION] " << e.what() << std::endl;
         }
 
-        std::cout << "[INFO] Cycle fini. Pause de 65s..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(65));
+        // L'API Binance est ultra permissive, on peut rafraîchir toutes les 10 secondes
+        std::cout << "[INFO] Cycle fini. Pause de 10s..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(10));
     }
 }
 
@@ -549,7 +567,11 @@ int main() {
             }
             prix = it->second.prix;
         }
+        // 1. NOUVEAU CALCUL AVEC FRAIS
         double valeurTrade = prix * quantite;
+        double frais = valeurTrade * 0.005; // 0.5%
+        double coutAchat = valeurTrade + frais;
+        double gainVente = valeurTrade - frais;
 
         sqlite3* db = openDatabase();
         int uid = getUserId(db, user);
@@ -563,6 +585,7 @@ int main() {
             sqlite3_close(db);
         };
 
+        // LA VRAIE FONCTION AU LIEU DES "..."
         auto getQty = [&](const std::string& sym) -> double {
             double q = 0.0;
             sqlite3_stmt* s;
@@ -576,14 +599,15 @@ int main() {
         };
 
         if (action == "achat") {
-            if (getQty("USD") < valeurTrade) {
+            // Vérifier avec coutAchat au lieu de valeurTrade
+            if (getQty("USD") < coutAchat) { 
                 rollback();
                 res.status = 403; res.set_content("{\"erreur\":\"Fonds USD insuffisants\"}", "application/json"); return;
             }
             
             sqlite3_stmt* debitUsd;
             if (sqlite3_prepare_v2(db, "UPDATE portefeuilles SET quantite = quantite - ? WHERE user_id = ? AND symbole = 'USD';", -1, &debitUsd, nullptr) == SQLITE_OK) {
-                sqlite3_bind_double(debitUsd, 1, valeurTrade);
+                sqlite3_bind_double(debitUsd, 1, coutAchat); // <-- Débiter coutAchat
                 sqlite3_bind_int(debitUsd, 2, uid);
                 sqlite3_step(debitUsd);
             }
@@ -616,7 +640,7 @@ int main() {
 
             sqlite3_stmt* creditUsd;
             if (sqlite3_prepare_v2(db, "UPDATE portefeuilles SET quantite = quantite + ? WHERE user_id = ? AND symbole = 'USD';", -1, &creditUsd, nullptr) == SQLITE_OK) {
-                sqlite3_bind_double(creditUsd, 1, valeurTrade);
+                sqlite3_bind_double(creditUsd, 1, gainVente); // <-- Créditer gainVente
                 sqlite3_bind_int(creditUsd, 2, uid);
                 sqlite3_step(creditUsd);
             }
@@ -632,7 +656,9 @@ int main() {
             sqlite3_bind_text(logTrade, 4, symbole.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_double(logTrade, 5, quantite);
             sqlite3_bind_double(logTrade, 6, prix);
-            sqlite3_bind_double(logTrade, 7, valeurTrade);
+            
+            // On log la valeur nette (incluant les frais) dans l'historique
+            sqlite3_bind_double(logTrade, 7, action == "achat" ? coutAchat : gainVente); 
             sqlite3_step(logTrade);
         }
         sqlite3_finalize(logTrade);
