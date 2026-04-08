@@ -1,24 +1,27 @@
-let utilisateurActuel = "";
+// ── State ────────────────────────────────────────────────────────────────────
+let currentUser       = "";
 let masterTickInterval = null;
-let cacheClassement = {};
-let graphiqueActif = null;
-let symboleActuel = "";
-let periodeActuelle = "24h";
-let lastTickTime = performance.now();
-let tickCount = 0;
+let leaderboardCache  = {};
+let activeChart       = null;
+let currentSymbol     = "";
+let currentPeriod     = "24h";
+let lastTickTime      = performance.now();
+let tickCount         = 0;
 
-const tickHandlers = new Set();
+const tickHandlers    = new Set();
 const syncClockHandles = {};
-const GRAPH_REFRESH_RATE = 3;
-const cacheGraphique = {};
+const chartCache      = {};
+const CHART_REFRESH_EVERY = 3; // refresh graph every N ticks
 
-const formateurDevise = new Intl.NumberFormat('fr-FR', {
+const currencyFormatter = new Intl.NumberFormat('fr-FR', {
     style: 'currency',
     currency: 'USD',
-    currencyDisplay: 'narrowSymbol', // Force le symbole court ($) au lieu de $US
+    currencyDisplay: 'narrowSymbol',
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
 });
+
+// ── Master tick ───────────────────────────────────────────────────────────────
 
 function startMasterTick() {
     if (masterTickInterval) return;
@@ -34,14 +37,15 @@ function stopMasterTick() {
     masterTickInterval = null;
 }
 
-function tickGraphique(tick) {
-    if (symboleActuel && tick % GRAPH_REFRESH_RATE === 0) {
-        chargerGraphique(symboleActuel, periodeActuelle);
-    }
+function tickChart(tick) {
+    if (currentSymbol && tick % CHART_REFRESH_EVERY === 0)
+        loadChart(currentSymbol, currentPeriod);
 }
 
-function verifierSession() {
-    const loader = document.getElementById("chargement");
+// ── Session ───────────────────────────────────────────────────────────────────
+
+function checkSession() {
+    const loader = document.getElementById("loading");
     fetch("/api/check-session")
         .then(res => {
             if (loader) loader.style.display = "none";
@@ -49,16 +53,16 @@ function verifierSession() {
             throw new Error();
         })
         .then(data => {
-            utilisateurActuel = data.user;
-            demarrerJeu();
+            currentUser = data.user;
+            startGame();
         })
         .catch(() => {
             if (loader) loader.style.display = "none";
-            document.getElementById("zone-login").style.display = "block";
+            document.getElementById("login-zone").style.display = "block";
         });
 }
 
-function seConnecter() {
+function login() {
     const params = new URLSearchParams();
     params.append("user", document.getElementById("user").value);
     params.append("pass", document.getElementById("pass").value);
@@ -66,41 +70,35 @@ function seConnecter() {
     fetch("/api/login", { method: "POST", body: params })
         .then(async res => {
             const data = await res.json();
-            if (!res.ok) {
-                // On utilise le message envoyé par le serveur s'il existe
-                throw new Error(data.erreur || "Identifiants incorrects");
-            }
+            if (!res.ok) throw new Error(data.error || "Invalid credentials");
             return data;
         })
         .then(() => fetch("/api/check-session").then(r => r.json()))
         .then(data => {
-            utilisateurActuel = data.user;
-            demarrerJeu();
+            currentUser = data.user;
+            startGame();
         })
         .catch(err => {
-            // Ici, err.message contiendra "Compte en attente de validation..."
-            document.getElementById("message-erreur").innerText = err.message;
+            document.getElementById("login-error").innerText = err.message;
         });
 }
 
-function sInscrire() {
+function register() {
     const params = new URLSearchParams();
     params.append("user", document.getElementById("reg-user").value);
     params.append("pass", document.getElementById("reg-pass").value);
-    params.append("tel", document.getElementById("reg-tel").value); // NOUVEAU
+    params.append("tel",  document.getElementById("reg-phone").value);
     const msg = document.getElementById("reg-message");
 
     fetch("/api/register", { method: "POST", body: params })
         .then(async res => {
             const data = await res.json();
-            if (!res.ok) throw new Error(data.erreur || "Ce pseudo ou numéro est déjà pris.");
+            if (!res.ok) throw new Error(data.error || "Username or phone already taken.");
             msg.style.color = "orange";
-            msg.innerText = "Compte créé ! En attente de validation par un administrateur ⏳";
-            
-            // Vider les champs
-            document.getElementById("reg-user").value = "";
-            document.getElementById("reg-pass").value = "";
-            document.getElementById("reg-tel").value = "";
+            msg.innerText = "Account created! Waiting for admin approval ⏳";
+            document.getElementById("reg-user").value  = "";
+            document.getElementById("reg-pass").value  = "";
+            document.getElementById("reg-phone").value = "";
         })
         .catch(err => {
             msg.style.color = "red";
@@ -108,235 +106,248 @@ function sInscrire() {
         });
 }
 
-
-
-function seDeconnecter() {
+function logout() {
     fetch("/api/logout", { method: "POST" }).then(() => {
-        localStorage.removeItem("dernierTab");
+        localStorage.removeItem("lastTab");
         tickHandlers.clear();
         stopMasterTick();
         location.reload();
     });
 }
 
-function demarrerJeu() {
-    document.getElementById("zone-login").style.display = "none";
-    document.getElementById("zone-jeu").style.display = "block";
+// ── Game bootstrap ────────────────────────────────────────────────────────────
 
-    tickHandlers.add(actualiserDashboard);
-    actualiserDashboard();
+function startGame() {
+    document.getElementById("login-zone").style.display = "none";
+    document.getElementById("game-zone").style.display  = "block";
+
+    tickHandlers.add(refreshDashboard);
+    refreshDashboard();
     startMasterTick();
 
-    switchTab(localStorage.getItem("dernierTab") || "marche");
+    switchTab(localStorage.getItem("lastTab") || "market");
 }
 
+// ── Tab routing ───────────────────────────────────────────────────────────────
+
 function switchTab(tabName) {
-    localStorage.setItem("dernierTab", tabName);
+    localStorage.setItem("lastTab", tabName);
     document.querySelectorAll(".tab-content").forEach(t => (t.style.display = "none"));
-    
+
     const target = document.getElementById(`tab-${tabName}`);
     if (target) target.style.display = "block";
 
-    const isPropos = tabName === "propos";
-    document.querySelector(".user-dashboard-header").style.display = isPropos ? "none" : "flex";
+    const isAbout = tabName === "about";
+    document.querySelector(".user-dashboard-header").style.display = isAbout ? "none" : "flex";
 
-    arreterBoucleMarche();
-    arreterBoucleClassement();
-    arreterBouclePortefeuille();
+    stopMarketLoop();
+    stopLeaderboardLoop();
+    stopPortfolioLoop();
 
-    if (tabName === "marche") demarrerBoucleMarche();
-    else if (tabName === "classement") demarrerBoucleClassement();
-    else if (tabName === "portefeuille") demarrerBouclePortefeuille();
+    if      (tabName === "market")      startMarketLoop();
+    else if (tabName === "leaderboard") startLeaderboardLoop();
+    else if (tabName === "portfolio")   startPortfolioLoop();
 }
 
-function demarrerBoucleMarche() {
-    tickHandlers.add(actualiserTableauMarche);
-    tickHandlers.add(tickGraphique);
-    actualiserTableauMarche();
+// ── Market tab ────────────────────────────────────────────────────────────────
+
+function startMarketLoop() {
+    tickHandlers.add(refreshMarketTable);
+    tickHandlers.add(tickChart);
+    refreshMarketTable();
     startSyncClock("sync-clock");
 }
 
-function arreterBoucleMarche() {
-    tickHandlers.delete(actualiserTableauMarche);
-    tickHandlers.delete(tickGraphique);
+function stopMarketLoop() {
+    tickHandlers.delete(refreshMarketTable);
+    tickHandlers.delete(tickChart);
     cancelSyncClock("sync-clock");
 }
 
-function actualiserTableauMarche() {
+function refreshMarketTable() {
     const tbody = document.getElementById("market-body");
     if (!tbody) return;
 
-    fetch("/api/marche")
+    fetch("/api/market")
         .then(res => res.json())
         .then(data => {
-            console.log("Données reçues du serveur :", data); // <--- DEBUG
             if (data.length === 0) {
-            // ...
-                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#f39c12;">Synchronisation en cours... 📡</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#f39c12;">Syncing... 📡</td></tr>`;
                 return;
             }
             tbody.innerHTML = "";
-            data.forEach(action => {
-                const tr = document.createElement("tr");
-                const variColor = action.variation_24h >= 0 ? "#2ecc71" : "#e74c3c";
-                const variSign = action.variation_24h >= 0 ? "+" : "";
+            data.forEach(asset => {
+                const tr         = document.createElement("tr");
+                const changeColor = asset.change24h >= 0 ? "#2ecc71" : "#e74c3c";
+                const changeSign  = asset.change24h >= 0 ? "+" : "";
                 tr.innerHTML = `
-                    <td><strong>${action.symbol}</strong></td>
-                    <td class="price">${action.price.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $</td>
-                    <td style="font-family:'Courier New',monospace; font-weight:bold; color:${variColor};">
-                        ${variSign}${action.variation_24h.toFixed(2)}%
+                    <td><strong>${asset.symbol}</strong></td>
+                    <td class="price">${asset.price.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $</td>
+                    <td style="font-family:'Courier New',monospace; font-weight:bold; color:${changeColor};">
+                        ${changeSign}${asset.change24h.toFixed(2)}%
                     </td>
-                    <td><button class="btn-detail" onclick="voirDetail('${action.symbol}')">Détails</button></td>`;
+                    <td><button class="btn-detail" onclick="openDetail('${asset.symbol}')">Details</button></td>`;
                 tbody.appendChild(tr);
-                
-                // 2. NOUVEAU : Si cet actif est celui ouvert dans le détail, on met à jour le prix Spot
-                if (action.symbol === symboleActuel) {
-                    const elPrix = document.getElementById("detail-prix");
-                    if (elPrix) {
-                        elPrix.innerText = action.price.toLocaleString("fr-FR", { 
-                            minimumFractionDigits: 2, 
-                            maximumFractionDigits: 2 
+
+                // Live-update the price in the detail panel if it's open
+                if (asset.symbol === currentSymbol) {
+                    const priceEl = document.getElementById("detail-price");
+                    if (priceEl)
+                        priceEl.innerText = asset.price.toLocaleString("fr-FR", {
+                            minimumFractionDigits: 2, maximumFractionDigits: 2
                         }) + " $";
-                    }
                 }
             });
         })
         .catch(() => {
-            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:red;">Erreur réseau ❌</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:red;">Network error ❌</td></tr>`;
         });
 }
 
-function demarrerBoucleClassement() {
-    tickHandlers.add(chargerClassement);
-    chargerClassement();
-    startSyncClock("sync-clock-classement");
+// ── Leaderboard tab ───────────────────────────────────────────────────────────
+
+function startLeaderboardLoop() {
+    tickHandlers.add(loadLeaderboard);
+    loadLeaderboard();
+    startSyncClock("sync-clock-leaderboard");
 }
 
-function arreterBoucleClassement() {
-    tickHandlers.delete(chargerClassement);
-    cancelSyncClock("sync-clock-classement");
+function stopLeaderboardLoop() {
+    tickHandlers.delete(loadLeaderboard);
+    cancelSyncClock("sync-clock-leaderboard");
 }
 
-function chargerClassement() {
-    fetch("/api/classement")
+function loadLeaderboard() {
+    fetch("/api/leaderboard")
         .then(res => res.json())
         .then(data => {
-            const moi = data.find(u => u.username === utilisateurActuel);
-            if (moi) appliquerDonneesDashboard(moi);
+            const me = data.find(u => u.username === currentUser);
+            if (me) applyDashboardData(me);
 
             const tbody = document.getElementById("leaderboard-body");
             if (!tbody) return;
             tbody.innerHTML = "";
-            
-            data.forEach((joueur, index) => {
-                const tr = document.createElement("tr");
-                const medaille = index === 0 ? "🥇" : index === 1 ? "🥈" : index === 2 ? "🥉" : index + 1;
 
-                const valeurAncienne = cacheClassement[joueur.username];
-                if (valeurAncienne !== undefined) {
-                    if (joueur.valeur_totale > valeurAncienne) tr.className = "gain-update";
-                    else if (joueur.valeur_totale < valeurAncienne) tr.className = "perte-update";
+            data.forEach((player, index) => {
+                const tr     = document.createElement("tr");
+                const medal  = index === 0 ? "🥇" : index === 1 ? "🥈" : index === 2 ? "🥉" : index + 1;
+
+                const cached = leaderboardCache[player.username];
+                if (cached !== undefined) {
+                    if      (player.portfolio_value > cached) tr.className = "gain-update";
+                    else if (player.portfolio_value < cached) tr.className = "loss-update";
                 }
-                cacheClassement[joueur.username] = joueur.valeur_totale;
+                leaderboardCache[player.username] = player.portfolio_value;
 
-                const colorTotal = joueur.pnl.startsWith("+") && joueur.pnl !== "+0.00%" ? "#2ecc71" : joueur.pnl.startsWith("-") ? "#e74c3c" : "gray";
-                const color24h = joueur.pnl_24h_pct?.startsWith("+") && joueur.pnl_24h_pct !== "+0.00%" ? "#2ecc71" : joueur.pnl_24h_pct?.startsWith("-") ? "#e74c3c" : "gray";
+                const colorTotal = player.pnl.startsWith("+") && player.pnl !== "+0.00%"
+                    ? "#2ecc71" : player.pnl.startsWith("-") ? "#e74c3c" : "gray";
+                const color24h = player.pnl_24h_pct?.startsWith("+") && player.pnl_24h_pct !== "+0.00%"
+                    ? "#2ecc71" : player.pnl_24h_pct?.startsWith("-") ? "#e74c3c" : "gray";
 
                 tr.innerHTML = `
-                    <td>${medaille}</td>
-                    <td><strong>${joueur.username}</strong></td>
-                    <td style="font-weight:bold;">${joueur.valeur_totale.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $</td>
+                    <td>${medal}</td>
+                    <td><strong>${player.username}</strong></td>
+                    <td style="font-weight:bold;">${player.portfolio_value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $</td>
                     <td style="color:${color24h};font-weight:bold;">
-                        ${joueur.pnl_24h_usd ?? "—"} $<br><span style="font-size:0.85em;">${joueur.pnl_24h_pct ?? "—"}</span>
+                        ${player.pnl_24h_usd ?? "—"} $<br><span style="font-size:0.85em;">${player.pnl_24h_pct ?? "—"}</span>
                     </td>
                     <td style="color:${colorTotal};font-weight:bold;">
-                        ${joueur.pnl_total_usd ?? "—"} $<br><span style="font-size:0.85em;">${joueur.pnl}</span>
+                        ${player.pnl_total_usd ?? "—"} $<br><span style="font-size:0.85em;">${player.pnl}</span>
                     </td>`;
                 tbody.appendChild(tr);
             });
         });
 }
 
-function appliquerDonneesDashboard(data) {
+// ── Dashboard header ──────────────────────────────────────────────────────────
+
+function applyDashboardData(data) {
     document.getElementById("dash-username").innerText = data.username.toUpperCase();
-    document.getElementById("dash-wallet").innerText = formateurDevise.format(data.valeur_totale);
+    document.getElementById("dash-wallet").innerText   = currencyFormatter.format(data.portfolio_value);
 
     const pnlEl = document.getElementById("dash-pnl");
-    pnlEl.innerText = `${data.pnl} (${data.pnl_total_usd ?? "—"} $)`;
-    pnlEl.style.color = data.pnl.startsWith("+") && data.pnl !== "+0.00%" ? "#2ecc71" : data.pnl.startsWith("-") ? "#e74c3c" : "#888";
+    pnlEl.innerText  = `${data.pnl} (${data.pnl_total_usd ?? "—"} $)`;
+    pnlEl.style.color = data.pnl.startsWith("+") && data.pnl !== "+0.00%"
+        ? "#2ecc71" : data.pnl.startsWith("-") ? "#e74c3c" : "#888";
 
     const pnl24El = document.getElementById("dash-pnl24h");
     if (pnl24El && data.pnl_24h_pct !== undefined) {
         const isPos = data.pnl_24h_pct.startsWith("+") && data.pnl_24h_pct !== "+0.00%";
-        pnl24El.innerText = `${data.pnl_24h_pct} (${data.pnl_24h_usd} $)`;
+        pnl24El.innerText  = `${data.pnl_24h_pct} (${data.pnl_24h_usd} $)`;
         pnl24El.style.color = isPos ? "#2ecc71" : data.pnl_24h_pct.startsWith("-") ? "#e74c3c" : "#888";
     }
+
     const usdEl = document.getElementById("dash-usd");
-    if (usdEl && data.usd !== undefined) {
-        usdEl.innerText = formateurDevise.format(data.usd);
-    }
+    if (usdEl && data.usd !== undefined)
+        usdEl.innerText = currencyFormatter.format(data.usd);
 }
 
-function actualiserDashboard() {
-    if (!utilisateurActuel) return;
-    fetch("/api/dashboard").then(res => res.json()).then(data => appliquerDonneesDashboard(data));
+function refreshDashboard() {
+    if (!currentUser) return;
+    fetch("/api/dashboard")
+        .then(res => res.json())
+        .then(data => applyDashboardData(data));
 }
 
+// Clock in dashboard header
 setInterval(() => {
     document.getElementById("dash-clock").innerText = new Date().toLocaleTimeString();
 }, 1000);
 
-function demarrerBouclePortefeuille() {
-    tickHandlers.add(chargerPortefeuille);
-    chargerPortefeuille();
-    startSyncClock("sync-clock-portefeuille");
+// ── Portfolio tab ─────────────────────────────────────────────────────────────
+
+function startPortfolioLoop() {
+    tickHandlers.add(loadPortfolio);
+    loadPortfolio();
+    startSyncClock("sync-clock-portfolio");
 }
 
-function arreterBouclePortefeuille() {
-    tickHandlers.delete(chargerPortefeuille);
-    cancelSyncClock("sync-clock-portefeuille");
+function stopPortfolioLoop() {
+    tickHandlers.delete(loadPortfolio);
+    cancelSyncClock("sync-clock-portfolio");
 }
 
-function chargerPortefeuille() {
-    fetch("/api/portefeuille")
+function loadPortfolio() {
+    fetch("/api/portfolio")
         .then(res => res.json())
         .then(data => {
             const tbody = document.getElementById("portfolio-body");
             if (!tbody) return;
             tbody.innerHTML = "";
-            data.forEach(ligne => {
+            data.forEach(row => {
                 const tr = document.createElement("tr");
                 tr.innerHTML = `
-                    <td><strong>${ligne.symbole}</strong></td>
-                    <td style="font-family:'Courier New',monospace;">${ligne.quantite.toLocaleString("en-US", { maximumFractionDigits: 6 })}</td>
-                    <td style="font-family:'Courier New',monospace;">${ligne.prix_unitaire > 0 ? ligne.prix_unitaire.toLocaleString("en-US", { minimumFractionDigits: 2 }) + " $" : "—"}</td>
-                    <td style="font-family:'Courier New',monospace; font-weight:bold;">${formateurDevise.format(ligne.valeur)}</td>`;
+                    <td><strong>${row.symbol}</strong></td>
+                    <td style="font-family:'Courier New',monospace;">${row.quantity.toLocaleString("en-US", { maximumFractionDigits: 6 })}</td>
+                    <td style="font-family:'Courier New',monospace;">${row.unit_price > 0 ? row.unit_price.toLocaleString("en-US", { minimumFractionDigits: 2 }) + " $" : "—"}</td>
+                    <td style="font-family:'Courier New',monospace; font-weight:bold;">${currencyFormatter.format(row.value)}</td>`;
                 tbody.appendChild(tr);
             });
         });
 }
 
+// ── Sync clock (canvas ring) ──────────────────────────────────────────────────
+
 function startSyncClock(canvasId) {
     cancelSyncClock(canvasId);
     const canvas = document.getElementById(canvasId);
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
+    const ctx  = canvas.getContext("2d");
     const TICK = 5000;
     let resetting = false;
 
     function draw(now) {
-        const elapsed = (now - lastTickTime) % TICK;
-        const progress = elapsed / TICK;
+        const progress = ((now - lastTickTime) % TICK) / TICK;
         ctx.clearRect(0, 0, 28, 28);
 
         const cx = 14, cy = 14, r = 10;
         const startAngle = -Math.PI / 2;
-        const endAngle = startAngle + progress * 2 * Math.PI;
 
+        // Background ring
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
         ctx.strokeStyle = "rgba(128,128,128,0.2)";
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth   = 2.5;
         ctx.stroke();
 
         if (resetting) {
@@ -347,13 +358,15 @@ function startSyncClock(canvasId) {
             ctx.moveTo(9, 14); ctx.lineTo(12.5, 17.5); ctx.lineTo(19, 10);
             ctx.stroke();
         } else if (progress <= 0.98) {
+            const endAngle = startAngle + progress * 2 * Math.PI;
             const grad = ctx.createLinearGradient(cx - r, cy, cx + r, cy);
-            grad.addColorStop(0, "#1877f2"); grad.addColorStop(1, "#2ecc71");
+            grad.addColorStop(0, "#1877f2");
+            grad.addColorStop(1, "#2ecc71");
             ctx.beginPath();
             ctx.arc(cx, cy, r, startAngle, endAngle);
             ctx.strokeStyle = grad;
             ctx.stroke();
-            
+            // Leading dot
             ctx.beginPath();
             ctx.arc(cx + r * Math.cos(endAngle), cy + r * Math.sin(endAngle), 2.5, 0, Math.PI * 2);
             ctx.fillStyle = "#2ecc71";
@@ -374,43 +387,45 @@ function cancelSyncClock(canvasId) {
     }
 }
 
-function voirDetail(symbol) {
-    symboleActuel = symbol;
-    document.getElementById("detail-titre").innerText = symbol;
-    document.getElementById("trade-message").innerText = "";
-    document.getElementById("panneau-detail").style.display = "block";
-    chargerGraphique(symboleActuel, periodeActuelle);
+// ── Detail panel ──────────────────────────────────────────────────────────────
+
+function openDetail(symbol) {
+    currentSymbol = symbol;
+    document.getElementById("detail-title").innerText       = symbol;
+    document.getElementById("trade-message").innerText      = "";
+    document.getElementById("detail-panel").style.display   = "block";
+    loadChart(currentSymbol, currentPeriod);
 }
 
-function fermerDetail() {
-    document.getElementById("panneau-detail").style.display = "none";
-    if (graphiqueActif) { graphiqueActif.destroy(); graphiqueActif = null; }
-    symboleActuel = "";
+function closeDetail() {
+    document.getElementById("detail-panel").style.display = "none";
+    if (activeChart) { activeChart.destroy(); activeChart = null; }
+    currentSymbol = "";
 }
 
-function changerFenetre(periode) {
-    periodeActuelle = periode;
+function changePeriod(period) {
+    currentPeriod = period;
     document.querySelectorAll(".btn-time").forEach(b => b.classList.remove("active"));
-    document.getElementById(`btn-${periode}`).classList.add("active");
-    chargerGraphique(symboleActuel, periodeActuelle);
+    document.getElementById(`btn-${period}`).classList.add("active");
+    loadChart(currentSymbol, currentPeriod);
 }
 
-function getCacheKey(symbol, periode) { return `${symbol}_${periode}`; }
+function getCacheKey(symbol, period) { return `${symbol}_${period}`; }
 
-function chargerGraphique(symbol, periode) {
-    const key = getCacheKey(symbol, periode);
-    const cache = cacheGraphique[key];
-    const url = cache
-        ? `/api/historique?symbole=${symbol}&periode=${periode}&depuis=${encodeURIComponent(cache.lastTimestamp)}`
-        : `/api/historique?symbole=${symbol}&periode=${periode}`;
+function loadChart(symbol, period) {
+    const key   = getCacheKey(symbol, period);
+    const cache = chartCache[key];
+    const url   = cache
+        ? `/api/history?symbol=${symbol}&period=${period}&since=${encodeURIComponent(cache.lastTimestamp)}`
+        : `/api/history?symbol=${symbol}&period=${period}`;
 
     fetch(url)
         .then(res => res.json())
         .then(data => {
             if (!cache) {
-                cacheGraphique[key] = {
-                    labels: data.map(d => d.time),
-                    prices: data.map(d => d.price),
+                chartCache[key] = {
+                    labels:        data.map(d => d.time),
+                    prices:        data.map(d => d.price),
                     lastTimestamp: data.length ? data[data.length - 1].timestamp : ""
                 };
             } else if (data.length > 0) {
@@ -419,25 +434,26 @@ function chargerGraphique(symbol, periode) {
                 cache.lastTimestamp = data[data.length - 1].timestamp;
             }
 
-            const c = cacheGraphique[key];
+            const c = chartCache[key];
             if (!c.prices.length) return;
 
-            document.getElementById("detail-prix").innerText = c.prices[c.prices.length - 1].toLocaleString("fr-FR", {minimumFractionDigits: 2}) + " $";
-            dessinerGraphique(c.labels, c.prices);
+            document.getElementById("detail-price").innerText =
+                c.prices[c.prices.length - 1].toLocaleString("fr-FR", { minimumFractionDigits: 2 }) + " $";
+            drawChart(c.labels, c.prices);
         })
-        .catch(err => console.error("Erreur graphique:", err));
+        .catch(err => console.error("Chart load error:", err));
 }
 
-function dessinerGraphique(labels, prices) {
-    const ctx = document.getElementById("graphique-actif").getContext("2d");
-    if (graphiqueActif) graphiqueActif.destroy();
+function drawChart(labels, prices) {
+    const ctx = document.getElementById("chart-canvas").getContext("2d");
+    if (activeChart) activeChart.destroy();
 
-    graphiqueActif = new Chart(ctx, {
+    activeChart = new Chart(ctx, {
         type: "line",
         data: {
             labels,
             datasets: [{
-                label: "Prix",
+                label: "Price",
                 data: prices,
                 borderColor: "#1877f2",
                 backgroundColor: "rgba(24,119,242,0.1)",
@@ -461,49 +477,54 @@ function dessinerGraphique(labels, prices) {
     });
 }
 
-function passerOrdre(action) {
-    const quantite = document.getElementById("trade-quantite").value;
-    const msgBox = document.getElementById("trade-message");
+// ── Trading ───────────────────────────────────────────────────────────────────
 
-    if (!quantite || quantite <= 0) {
-        msgBox.innerText = "Veuillez entrer une quantité valide.";
+function placeOrder(action) {
+    const quantity = document.getElementById("trade-quantity").value;
+    const msgBox   = document.getElementById("trade-message");
+
+    if (!quantity || quantity <= 0) {
+        msgBox.innerText   = "Please enter a valid quantity.";
         msgBox.style.color = "red";
         return;
     }
 
-    msgBox.innerText = "Transaction en cours... ⏳";
+    msgBox.innerText   = "Processing... ⏳";
     msgBox.style.color = "orange";
 
     const params = new URLSearchParams();
-    params.append("symbole", symboleActuel);
-    params.append("action", action);
-    params.append("quantite", quantite);
+    params.append("symbol",   currentSymbol);
+    params.append("action",   action);
+    params.append("quantity", quantity);
 
     fetch("/api/trade", { method: "POST", body: params })
         .then(async res => {
             const data = await res.json();
-            if (!res.ok) throw new Error(data.erreur || "Erreur de transaction");
-            msgBox.innerText = `${data.message} ✅`;
+            if (!res.ok) throw new Error(data.error || "Transaction failed");
+            msgBox.innerText   = `${data.message} ✅`;
             msgBox.style.color = "green";
-            document.getElementById("trade-quantite").value = "";
-            actualiserDashboard();
+            document.getElementById("trade-quantity").value = "";
+            refreshDashboard();
         })
         .catch(err => {
-            msgBox.innerText = `${err.message} ❌`;
+            msgBox.innerText   = `${err.message} ❌`;
             msgBox.style.color = "red";
         });
 }
 
-function lierToucheEntree(idActuel, idSuivant) {
-    document.getElementById(idActuel).addEventListener("keydown", e => {
+// ── Keyboard helpers ──────────────────────────────────────────────────────────
+
+function bindEnterKey(currentId, nextId) {
+    document.getElementById(currentId).addEventListener("keydown", e => {
         if (e.key === "Enter") {
             e.preventDefault();
-            document.getElementById(idSuivant).focus();
+            document.getElementById(nextId).focus();
         }
     });
 }
 
-lierToucheEntree("user", "pass");
-lierToucheEntree("reg-user", "reg-pass");
+bindEnterKey("user",     "pass");
+bindEnterKey("reg-user", "reg-pass");
 
-verifierSession();
+// ── Boot ──────────────────────────────────────────────────────────────────────
+checkSession();
