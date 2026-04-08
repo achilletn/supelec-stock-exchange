@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Prototype Bourse</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+</head>
+<body>
+    <div id="chargement" style="text-align: center; padding: 20px;">
+        Chargement de la session... ⏳
+    </div>
+    
+    <div id="zone-login" style="display: none;">
+        <header class="auth-header">
+            <h1>Supélec Stock Exchange</h1>
+            <p class="tagline">Jeu de simulation d'investissement boursier</p>
+        </header>
+
+        <div class="info-box">
+            <p>🚀 <strong>Session d'entraînement :</strong> Utilisez ce prototype pour trader du Bitcoin et de l'Ethereum en temps réel.</p>
+        </div>
+
+        <form class="auth-box" onsubmit="event.preventDefault(); seConnecter();" autocomplete="off">
+            <h3>Connexion</h3>
+            <input type="text" id="user" placeholder="Pseudo" required>
+            <input type="password" id="pass" placeholder="Mot de passe" required>
+            <button type="submit">Se connecter</button>
+            <p id="message-erreur" class="error-text"></p>
+        </form>
+
+        <div class="auth-divider"><span>OU</span></div>
+
+        <form class="auth-box" onsubmit="event.preventDefault(); sInscrire();" autocomplete="off">
+            <h3>Créer un compte</h3>
+            <input type="text" id="reg-user" placeholder="Choisir un pseudo" required>
+            <input type="tel" id="reg-tel" placeholder="Téléphone (ex: 0612345678)" required pattern="[0-9]{10}">
+            <input type="password" id="reg-pass" placeholder="Mot de passe" required>
+            <button type="submit" class="btn-alt">S'inscrire</button>
+            <p id="reg-message" class="error-text"></p>
+        </form>
+    </div>
+
+    <div id="zone-jeu" style="display: none;">
+        <nav class="game-nav">
+            <button onclick="switchTab('marche')">Marché</button>
+            <button onclick="switchTab('classement')">Classement</button>
+            <button onclick="switchTab('portefeuille')">Portefeuille</button>
+            <button onclick="switchTab('propos')">A propos</button>
+            <button onclick="seDeconnecter()">Se déconnecter</button>
+        </nav>
+
+        <div class="user-dashboard-header">
+            <div class="dash-item">
+                <span class="dash-label">👤 TRADER</span>
+                <span id="dash-username" class="dash-value">...</span>
+            </div>
+            <div class="dash-item">
+                <span class="dash-label">💰 PORTEFEUILLE</span>
+                <span id="dash-wallet" class="dash-value">0.00 $</span>
+            </div>
+            <div class="dash-item">
+                <span class="dash-label">💵 LIQUIDITÉS</span>
+                <span id="dash-usd" class="dash-value">0.00 $</span>
+            </div>
+            <div class="dash-item">
+                <span class="dash-label">📊 PNL 24H</span>
+                <span id="dash-pnl24h" class="dash-value">—</span>
+            </div>
+            <div class="dash-item">
+                <span class="dash-label">📈 PNL TOTAL</span>
+                <span id="dash-pnl" class="dash-value">0.00%</span>
+            </div>
+            <div class="dash-item">
+                <span class="dash-label">🕒 HEURE LOCALE</span>
+                <span id="dash-clock" class="dash-value">00:00:00</span>
+            </div>
+        </div>
+
+        <main id="tab-container">
+            <section id="tab-marche" class="tab-content">
+                <div class="market-header">
+                    <h2>Cours en direct (Binance)</h2>
+                    <div id="sync-status" class="sync-status">
+                        <canvas id="sync-clock" width="28" height="28"></canvas>
+                        <span id="sync-text" class="status-ok">Synchronisation</span>
+                    </div>
+                </div>
+                
+                <div class="trading-layout">
+                    <div class="colonne-liste">
+                        <table class="market-table">
+                            <thead>
+                                <tr>
+                                    <th>Symbole</th>
+                                    <th>Prix</th>
+                                    <th>Variation 24H</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="market-body">
+                                <tr><td colspan="4" style="text-align:center;">Chargement... ⏳</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="colonne-detail" id="panneau-detail" style="display: none;">
+                        <div class="detail-header">
+                            <h2 id="detail-titre" style="margin: 0;">Symbole</h2>
+                            <button class="btn-fermer" onclick="fermerDetail()">✖</button>
+                        </div>
+                        
+                        <div class="prix-gros" id="detail-prix">0.00 $</div>
+
+                        <div class="timeframe-selector">
+                            <button id="btn-1h" class="btn-time" onclick="changerFenetre('1h')">1 Heure</button>
+                            <button id="btn-24h" class="btn-time active" onclick="changerFenetre('24h')">24 Heures</button>
+                            <button id="btn-7d" class="btn-time" onclick="changerFenetre('7d')">7 Jours</button>
+                        </div>
+
+                        <div style="width: 100%; height: 250px; margin: 15px 0;">
+                            <canvas id="graphique-actif"></canvas>
+                        </div>
+
+                        <div class="trade-box">
+                            <input type="number" id="trade-quantite" placeholder="Qté" min="0.01" step="0.01" style="width: 80px;">
+                            <button class="btn-achat" onclick="passerOrdre('achat')">Acheter</button>
+                            <button class="btn-vente" onclick="passerOrdre('vente')">Vendre</button>
+                        </div>
+                        <p id="trade-message" style="margin-top:10px; font-weight:bold; font-size: 0.9em;"></p>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tab-classement" class="tab-content" style="display:none;">
+                <div class="market-header">
+                    <h2>Classement des Joueurs</h2>
+                    <div id="sync-status-classement" class="sync-status">
+                        <canvas id="sync-clock-classement" width="28" height="28"></canvas>
+                        <span class="status-ok">Synchronisation</span>
+                    </div>
+                </div>
+                <table class="market-table">
+                    <thead>
+                        <tr>
+                            <th>Rang</th>
+                            <th>Joueur</th>
+                            <th>Portefeuille</th>
+                            <th>PnL 24h</th>
+                            <th>PnL Total</th>
+                        </tr>
+                    </thead>
+                    <tbody id="leaderboard-body"></tbody>
+                </table>
+            </section>
+
+            <section id="tab-portefeuille" class="tab-content" style="display:none;">
+                <div class="market-header">
+                    <h2>Portefeuille du joueur</h2>
+                    <div id="sync-status-portefeuille" class="sync-status">
+                        <canvas id="sync-clock-portefeuille" width="28" height="28"></canvas>
+                        <span class="status-ok">Synchronisation</span>
+                    </div>
+                </div>
+                <table class="market-table">
+                    <thead>
+                        <tr>
+                            <th>Actif</th>
+                            <th>Quantité</th>
+                            <th>Prix actuel</th>
+                            <th>Valeur</th>
+                        </tr>
+                    </thead>
+                    <tbody id="portfolio-body"></tbody>
+                </table>
+            </section>
+
+            <section id="tab-propos" class="tab-content" style="display:none;">
+                <div class="propos-container">
+                    <h2>À propos de Supélec Stock Exchange</h2>
+                    <div class="propos-card">
+                        <h3>📜 Le règlement</h3>
+                        <p>Le jeu commence le XX/XX/XX à YY:YY:YY et se termine le ZZ/ZZ/ZZ à AA:AA:AA</p>
+                        <p>Un compte par personne</p>
+                    </div>
+                    <div class="propos-grid">
+                        <div class="propos-card">
+                            <h3>🛠️ Stack Technique</h3>
+                            <ul>
+                                <li><strong>Backend :</strong> C++ 20 (httplib)</li>
+                                <li><strong>Base de données :</strong> SQLite 3</li>
+                                <li><strong>Frontend :</strong> HTML5 / CSS3 / Vanilla JS</li>
+                                <li><strong>Flux :</strong> API Binance REST (Spot)</li>
+                            </ul>
+                        </div>
+                        <div class="propos-card">
+                            <h3>⚙️ Architecture</h3>
+                            <p>Architecture hybride avec <strong>mise à jour des cours en RAM</strong> (mutex-protected) et persistance des transactions via <strong>SQLite</strong>. Système de sessions sécurisé par cookies.</p>
+                        </div>
+                    </div>
+                    <div class="propos-card" style="text-align: center; margin-top: 20px;">
+                        <p>Développé avec passion sur <strong>Arch Linux</strong>.</p>
+                        <p style="font-size: 0.8em; color: #888;">Version 1.0.4 - 2026</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>

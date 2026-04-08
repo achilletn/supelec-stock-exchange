@@ -1,0 +1,402 @@
+/* ── Base ──────────────────────────────────────────────────────────────────── */
+body {
+    background-color: #f0f2f5;
+    color: #1c1e21;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: 0;
+}
+
+/* ── Conteneurs ───────────────────────────────────────────────────────────── */
+#zone-login, #zone-jeu, #chargement {
+    background-color: #fff;
+    padding: 2rem;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    width: 320px;
+    text-align: center;
+}
+
+#zone-jeu {
+    width: 1150px !important;  /* était 1000px */
+    max-width: 95vw;
+}
+
+
+/* ── Zone login  ──────────────────────────────────────────────────────────── */
+
+/* Style de l'en-tête de login */
+.auth-header h1 {
+    color: #1877f2;
+    margin-bottom: 5px;
+    font-size: 1.8em;
+    font-weight: 800;
+}
+
+.tagline {
+    color: #606770;
+    font-size: 0.9em;
+    margin-bottom: 25px;
+}
+
+/* Encart d'explication */
+.info-box {
+    background-color: #e7f3ff;
+    border-left: 4px solid #1877f2;
+    padding: 12px;
+    border-radius: 4px;
+    margin-bottom: 25px;
+    text-align: left;
+}
+
+.info-box p {
+    margin: 0;
+    font-size: 0.85em;
+    color: #1c1e21;
+    line-height: 1.4;
+}
+
+/* Séparateur visuel */
+.auth-divider {
+    margin: 20px 0;
+    position: relative;
+    text-align: center;
+}
+
+.auth-divider::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: #ddd;
+    z-index: 1;
+}
+
+.auth-divider span {
+    background: #fff;
+    padding: 0 10px;
+    color: #888;
+    font-size: 0.8em;
+    font-weight: bold;
+    position: relative;
+    z-index: 2;
+}
+
+/* Bouton secondaire */
+.btn-alt {
+    background-color: #42b72a !important;
+}
+
+.btn-alt:hover {
+    background-color: #36a420 !important;
+}
+
+/* Ajustement de la boîte de login */
+#zone-login {
+    width: 380px !important; /* Un peu plus large pour le confort */
+    padding: 30px !important;
+}
+
+/* ── Formulaires ──────────────────────────────────────────────────────────── */
+.auth-box {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 10px; /* Ajoute un petit souffle au-dessus des titres de formulaires */
+}
+
+
+h3 { margin-top: 0; color: #1877f2; }
+
+input {
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    font-size: 14px;
+}
+
+input:focus { outline: none; border-color: #1877f2; }
+
+hr { border: 0; border-top: 1px solid #eee; margin: 20px 0; }
+
+/* ── Boutons ──────────────────────────────────────────────────────────────── */
+button {
+    background-color: #1877f2;
+    color: white;
+    border: none;
+    padding: 10px;
+    border-radius: 5px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+button:hover { background-color: #166fe5; }
+button:active { transform: scale(0.98); }
+
+/* ── Messages ─────────────────────────────────────────────────────────────── */
+#message-erreur, #reg-message {
+    font-size: 13px;
+    margin-top: 10px;
+    min-height: 15px;
+}
+
+/* ── Navigation ───────────────────────────────────────────────────────────── */
+.game-nav {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+/* ── Tableau marché ───────────────────────────────────────────────────────── */
+.market-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+}
+
+.market-table th, .market-table td {
+    padding: 12px;
+    border-bottom: 1px solid #eee;
+    text-align: left;
+}
+
+.price {
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+    color: #2ecc71;
+}
+
+.btn-detail {
+    background-color: #f39c12;
+    font-size: 0.8em;
+}
+
+/* ── Layout trading (liste + panneau) ─────────────────────────────────────── */
+.trading-layout {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+}
+
+.colonne-liste { flex: 1; min-width: 300px; }
+
+.colonne-detail {
+    flex: 1.2;
+    background-color: #f8f9fa;
+    border-radius: 8px;
+    padding: 20px;
+    border: 1px solid #e1e4e8;
+    position: sticky;
+    top: 20px;
+}
+
+/* ── En-tête marché et classement ──────────────────────────────────────────── */
+.market-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 2px solid #eee;
+    padding-bottom: 10px;
+    margin-bottom: 15px;
+}
+
+.market-header h2 { margin: 0; }
+
+.sync-status {
+    font-size: 0.9em;
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background-color: #f8f9fa;
+    padding: 5px 10px;
+    border-radius: 20px;
+    border: 1px solid #ddd;
+}
+
+.status-ok     { color: #2ecc71; }
+.status-syncing{ color: #f39c12; }
+.status-error  { color: #e74c3c; }
+
+
+.ranking-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 2px solid #eee;
+    padding-bottom: 10px;
+    margin-bottom: 15px;
+}
+
+.ranking-header h2 { margin: 0; }
+
+/* ── Panneau détail ───────────────────────────────────────────────────────── */
+.detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#detail-prix {
+    transition: color 0.2s ease-in-out;
+}
+
+/* Optionnel : une petite animation de flash quand le texte change via JS */
+.flash-update {
+    animation: flashSignal 0.5s;
+}
+
+@keyframes flashSignal {
+    0% { opacity: 0.5; }
+    100% { opacity: 1; }
+}
+
+.btn-fermer {
+    background: none;
+    border: none;
+    color: #a0a0a0;
+    font-size: 1.5em;
+    padding: 0;
+    box-shadow: none;
+}
+
+.btn-fermer:hover { background: none; color: #e74c3c; transform: scale(1.1); }
+
+.prix-gros {
+    font-size: 2.5em;
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+    color: #2ecc71;
+    margin: 10px 0;
+}
+
+.timeframe-selector {
+    display: flex;
+    justify-content: center;
+    gap: 5px;
+    margin-bottom: 10px;
+}
+
+.btn-time {
+    background-color: white;
+    color: #1877f2;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 5px 15px;
+    font-size: 0.9em;
+    cursor: pointer;
+}
+
+.btn-time.active { background-color: #1877f2; color: white; border-color: #1877f2; }
+
+.trade-box { display: flex; gap: 10px; justify-content: center; }
+
+.btn-achat { background-color: #2ecc71; }
+.btn-vente { background-color: #e74c3c; }
+.btn-achat:hover { background-color: #27ae60; }
+.btn-vente:hover { background-color: #c0392b; }
+
+/* ── Dashboard header ─────────────────────────────────────────────────────── */
+.user-dashboard-header {
+    width: 100%;
+    box-sizing: border-box;
+    display: flex;
+    justify-content: space-between;
+    background-color: #1a1a1a;
+    color: white;
+    padding: 15px 20px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    border-left: 4px solid #3498db;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+.dash-item { display: flex; flex-direction: column; }
+
+.dash-label {
+    font-size: 0.7em;
+    color: #888;
+    letter-spacing: 1px;
+    margin-bottom: 3px;
+}
+
+.dash-value {
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+    font-size: 1.1em;
+}
+
+/* ── Animations ───────────────────────────────────────────────────────────── */
+.spinning {
+    display: inline-block;
+    animation: tourner 1s linear infinite;
+}
+
+@keyframes tourner {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}
+
+@keyframes flashVert  { 0% { background-color: rgba(46,204,113,0.4); } 100% { background-color: transparent; } }
+@keyframes flashRouge { 0% { background-color: rgba(231,76,60,0.4);  } 100% { background-color: transparent; } }
+
+.gain-update  { animation: flashVert  1s ease-out; }
+.perte-update { animation: flashRouge 1s ease-out; }
+
+.portfolio-summary {
+    display: flex;
+    gap: 20px;
+    background-color: #1a1a1a;
+    color: white;
+    padding: 15px 20px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    border-left: 4px solid #2ecc71;
+}
+
+.dash-item-big { display: flex; flex-direction: column; }
+
+.dash-value-big {
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+    font-size: 1.4em;
+}
+
+.propos-container {
+    max-width: 800px;
+    margin: 0 auto;
+    line-height: 1.6;
+}
+
+.propos-grid {
+    display: flex;
+    gap: 20px;
+    margin-top: 20px;
+}
+
+.propos-card {
+    background: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    border: 1px solid #eee;
+    flex: 1;
+    margin-bottom: 20px;
+}
+
+.propos-card h3 {
+    margin-top: 0;
+    color: #3498db;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 10px;
+}
+
+.propos-card ul {
+    padding-left: 20px;
+}
