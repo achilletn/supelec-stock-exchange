@@ -1,0 +1,28 @@
+# Variables pour faciliter les modifications futures
+CXX = g++
+CXXFLAGS = -w
+LIBS = -lsqlite3 -lpthread -lssl -lcrypto
+TARGET = serveur
+APACHE_BIN = /home/goudale/Documents/rezo/bourse/bin/apachectl
+
+# La règle par défaut (quand tu tapes juste 'make')
+all: restart_apache compile run
+
+# 1. Redémarrer Apache
+restart_apache:
+	@echo "🔄 Redémarrage d'Apache..."
+	sudo $(APACHE_BIN) -k restart
+
+# 2. Compiler le C++
+compile:
+	@echo "🔨 Compilation du serveur C++..."
+	$(CXX) serveur.cpp $(CXXFLAGS) -o $(TARGET) $(LIBS)
+
+# 3. Lancer le serveur
+run:
+	@echo "🚀 Lancement du serveur..."
+	./$(TARGET)
+
+# Optionnel : pour nettoyer les fichiers binaires
+clean:
+	rm -f $(TARGET)
