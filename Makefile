@@ -1,32 +1,28 @@
-CXX      = g++
-CXXFLAGS = -std=c++20 -O2 -Wall -Wextra -pthread -DCPPHTTPLIB_OPENSSL_SUPPORT
-LDFLAGS  = -lsqlite3 -lssl -lcrypto -lpthread
+# Variables pour faciliter les modifications futures
+CXX = g++
+CXXFLAGS = -w
+LIBS = -lsqlite3 -lpthread -lssl -lcrypto
+TARGET = serveur
+APACHE_BIN = /home/goudale/Documents/rezo/bourse/bin/apachectl
 
-SRC_DIR  = src
-BUILD_DIR = build
-TARGET   = bourse
+# La règle par défaut (quand tu tapes juste 'make')
+all: restart_apache compile run
 
-SOURCES  = $(SRC_DIR)/main.cpp \
-           $(SRC_DIR)/db.cpp \
-           $(SRC_DIR)/market.cpp \
-           $(SRC_DIR)/auth.cpp \
-           $(SRC_DIR)/routes_game.cpp \
-           $(SRC_DIR)/routes_admin.cpp
+# 1. Redémarrer Apache
+restart_apache:
+	@echo "🔄 Redémarrage d'Apache..."
+	sudo $(APACHE_BIN) -k restart
 
-OBJECTS  = $(SOURCES:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
+# 2. Compiler le C++
+compile:
+	@echo "🔨 Compilation du serveur C++..."
+	$(CXX) serveur.cpp $(CXXFLAGS) -o $(TARGET) $(LIBS)
 
-.PHONY: all clean
+# 3. Lancer le serveur
+run:
+	@echo "🚀 Lancement du serveur..."
+	./$(TARGET)
 
-all: $(BUILD_DIR) $(TARGET)
-
-$(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
-
-$(TARGET): $(OBJECTS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
-
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
-
+# Optionnel : pour nettoyer les fichiers binaires
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET)
+	rm -f $(TARGET)

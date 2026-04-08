@@ -1,60 +1,54 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-    <meta charset="UTF-8">
-    <title>ADMIN // SUPÉLEC TRADING</title>
-    <link rel="stylesheet" href="/admin/admin.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<meta charset="UTF-8">
+<title>ADMIN // GOUDALE TRADING</title>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<!-- ══ Login ══ -->
 <div id="login-screen">
   <div class="login-box">
-    <h2>⬡ RESTRICTED ACCESS</h2>
-    <p>// SYSTEM ADMINISTRATION CONSOLE</p>
+    <h2>⬡ ACCÈS RESTREINT</h2>
+    <p>// CONSOLE D'ADMINISTRATION SYSTÈME</p>
     <div class="field-group">
-      <label>Identifier</label>
+      <label>Identifiant</label>
       <input id="adm-user" type="text" autocomplete="off" spellcheck="false">
     </div>
     <div class="field-group">
-      <label>Access key</label>
+      <label>Clé d'accès</label>
       <input id="adm-pass" type="password">
     </div>
     <p id="login-err"></p>
-    <button class="btn-login" onclick="doLogin()">AUTHENTICATE</button>
+    <button class="btn-login" onclick="doLogin()">AUTHENTIFIER</button>
   </div>
 </div>
 
-<!-- ══ Admin panel ══ -->
 <div id="admin-screen">
   <header class="header">
-    <div class="header-logo">SUPÉLEC<span>/</span>ADMIN</div>
+    <div class="header-logo">GOUDALE<span>/</span>ADMIN</div>
     <div class="header-meta">
       <span id="header-clock" class="header-clock">00:00:00</span>
       <span class="badge-admin">ROOT</span>
-      <span style="cursor:pointer;color:var(--text-dim);" onclick="doLogout()">SIGN OUT ▸</span>
+      <span style="cursor:pointer;color:var(--text-dim);" onclick="doLogout()">DÉCONNEXION ▸</span>
     </div>
   </header>
 
   <div class="layout">
-
-    <!-- Sidebar -->
     <nav class="sidebar">
       <div class="sidebar-section">
-        <div class="sidebar-label">System</div>
+        <div class="sidebar-label">Système</div>
         <div class="nav-item active" onclick="goTab('overview')">
-          <span class="nav-icon">◈</span> Overview
+          <span class="nav-icon">◈</span> Vue Globale
         </div>
         <div class="nav-item" onclick="goTab('gamestate')">
-          <span class="nav-icon">⏻</span> Game State
+          <span class="nav-icon">⏻</span> État Partie
         </div>
       </div>
       <div class="sidebar-section">
-        <div class="sidebar-label">Data</div>
+        <div class="sidebar-label">Données</div>
         <div class="nav-item" onclick="goTab('users')">
-          <span class="nav-icon">◉</span> Users
+          <span class="nav-icon">◉</span> Utilisateurs
         </div>
         <div class="nav-item" onclick="goTab('trades')">
           <span class="nav-icon">⇄</span> Trades
@@ -68,140 +62,124 @@
       </div>
     </nav>
 
-    <!-- Content -->
     <main class="content">
 
-      <!-- ── Overview ── -->
       <div id="tab-overview" class="tab-panel active">
-        <div class="section-title">// OVERVIEW</div>
-        <div class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-label">Registered players</div>
-            <div class="stat-value" id="ov-users">—</div>
-          </div>
-          <div class="stat-card amber">
-            <div class="stat-label">Total trades</div>
-            <div class="stat-value" id="ov-trades">—</div>
-          </div>
-          <div class="stat-card blue">
-            <div class="stat-label">USD volume</div>
-            <div class="stat-value" id="ov-volume">—</div>
-          </div>
-          <div class="stat-card red">
-            <div class="stat-label">Game state</div>
-            <div class="stat-value" id="ov-state">—</div>
-          </div>
+        <div class="section-title">// VUE D'ENSEMBLE</div>
+        <div class="stats-grid" id="overview-stats">
+          <div class="stat-card"><div class="stat-label">Joueurs inscrits</div><div class="stat-value" id="ov-users">—</div></div>
+          <div class="stat-card amber"><div class="stat-label">Trades total</div><div class="stat-value" id="ov-trades">—</div></div>
+          <div class="stat-card blue"><div class="stat-label">Volume USD</div><div class="stat-value" id="ov-volume">—</div></div>
+          <div class="stat-card red"><div class="stat-label">État Partie</div><div class="stat-value" id="ov-state">—</div></div>
         </div>
 
-        <div class="section-title">// LATEST TRADES</div>
+        <div class="section-title">// DERNIERS TRADES</div>
         <div class="data-table-wrap">
           <table class="data-table">
             <thead><tr>
-              <th>Timestamp</th><th>Player</th><th>Action</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Value</th>
+              <th>Horodatage</th><th>Joueur</th><th>Action</th><th>Symbole</th><th>Qté</th><th>Prix</th><th>Valeur</th>
             </tr></thead>
             <tbody id="recent-trades-body">
-              <tr><td colspan="7" class="dim" style="padding:20px;text-align:center;">Loading...</td></tr>
+              <tr><td colspan="7" class="dim" style="padding:20px;text-align:center;">Chargement...</td></tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <!-- ── Game State ── -->
       <div id="tab-gamestate" class="tab-panel">
-        <div class="section-title">// GAME CONTROL</div>
+        <div class="section-title">// CONTRÔLE DE LA PARTIE</div>
+
         <div class="game-state-box">
-          <div class="state-indicator">
-            <div class="state-dot" id="state-dot"></div>
-            <div>
-              <div class="state-text running" id="state-text">GAME RUNNING</div>
-              <div class="state-sub" id="state-sub">Trades are allowed</div>
+          <div>
+            <div class="state-indicator">
+              <div class="state-dot" id="state-dot"></div>
+              <div>
+                <div class="state-text running" id="state-text">PARTIE EN COURS</div>
+                <div class="state-sub" id="state-sub">Les trades sont autorisés</div>
+              </div>
             </div>
           </div>
           <button class="btn-toggle-game stop" id="btn-toggle" onclick="toggleGameState()">
-            ⏹ STOP GAME
+            ⏹ ARRÊTER LA PARTIE
           </button>
         </div>
 
-        <div class="section-title">// INFO</div>
+        <div class="section-title">// INFORMATIONS</div>
         <div class="data-table-wrap" style="padding: 20px; font-size: 12px; line-height: 2;">
           <p style="color:var(--text-dim);">
-            ▸ <span style="color:var(--green);">GAME ACTIVE</span> — All calls to <span class="mono">/api/trade</span> are accepted normally.<br>
-            ▸ <span style="color:var(--red);">GAME STOPPED</span> — Calls to <span class="mono">/api/trade</span> return HTTP 503 with an error message.<br>
-            ▸ Prices and the leaderboard continue updating regardless of the game state.<br>
-            ▸ The state is persisted in the database and survives server restarts.
+            ▸ <span style="color:var(--green);">PARTIE ACTIVE</span> — Tous les appels à <span class="mono">/api/trade</span> sont acceptés normalement.<br>
+            ▸ <span style="color:var(--red);">PARTIE STOPPÉE</span> — Les appels à <span class="mono">/api/trade</span> retournent HTTP 503 avec message d'erreur.<br>
+            ▸ Les prix et le classement continuent de se mettre à jour indépendamment de l'état de la partie.<br>
+            ▸ L'état est persisté en base et survit aux redémarrages du serveur.
           </p>
         </div>
       </div>
 
-      <!-- ── Users ── -->
       <div id="tab-users" class="tab-panel">
-        <div class="section-title">// USER MANAGEMENT</div>
+        <div class="section-title">// GESTION DES UTILISATEURS</div>
         <div class="data-table-wrap">
           <div class="table-toolbar">
-            <input class="table-search" placeholder="Search a player..." oninput="filterUsers(this.value)">
+            <input class="table-search" placeholder="Rechercher un joueur..." oninput="filterUsers(this.value)">
             <span class="table-count" id="users-count"></span>
           </div>
           <table class="data-table">
             <thead><tr>
-              <th>ID</th><th>Username</th><th>Phone</th><th>Status</th><th>USD Cash</th><th>Total value</th><th>Actions</th>
+                <th>ID</th><th>Pseudo</th><th>Téléphone</th><th>Statut</th><th>Liquidités USD</th><th>Valeur totale</th><th>Actions</th>
             </tr></thead>
             <tbody id="users-body">
-              <tr><td colspan="7" class="dim" style="padding:20px;text-align:center;">Loading...</td></tr>
+              <tr><td colspan="7" class="dim" style="padding:20px;text-align:center;">Chargement...</td></tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <!-- ── Trades ── -->
       <div id="tab-trades" class="tab-panel">
-        <div class="section-title">// TRADE HISTORY</div>
+        <div class="section-title">// HISTORIQUE DES TRADES</div>
         <div class="data-table-wrap">
           <div class="table-toolbar">
-            <input class="table-search" placeholder="Filter by player or symbol..." oninput="filterTrades(this.value)">
+            <input class="table-search" placeholder="Filtrer par joueur ou symbole..." oninput="filterTrades(this.value)">
             <span class="table-count" id="trades-count"></span>
           </div>
           <table class="data-table">
             <thead><tr>
-              <th>ID</th><th>Timestamp</th><th>Player</th><th>Action</th><th>Symbol</th><th>Quantity</th><th>Unit price</th><th>Value</th><th>Op.</th>
+              <th>ID</th><th>Horodatage</th><th>Joueur</th><th>Action</th><th>Symbole</th><th>Quantité</th><th>Prix unit.</th><th>Valeur</th><th>Op.</th>
             </tr></thead>
             <tbody id="trades-body">
-              <tr><td colspan="9" class="dim" style="padding:20px;text-align:center;">Loading...</td></tr>
+              <tr><td colspan="9" class="dim" style="padding:20px;text-align:center;">Chargement...</td></tr>
             </tbody>
           </table>
           <div class="pagination" id="trades-pagination"></div>
         </div>
       </div>
 
-      <!-- ── Sessions ── -->
       <div id="tab-sessions" class="tab-panel">
-        <div class="section-title">// SESSIONS & CONNECTIONS</div>
+        <div class="section-title">// SESSIONS & CONNEXIONS</div>
         <div class="data-table-wrap">
           <div class="table-toolbar">
-            <input class="table-search" placeholder="Filter by IP or player..." oninput="filterSessions(this.value)">
+            <input class="table-search" placeholder="Filtrer par IP ou joueur..." oninput="filterSessions(this.value)">
             <span class="table-count" id="sessions-count"></span>
           </div>
           <table class="data-table">
             <thead><tr>
-              <th>Date / Time</th><th>Player</th><th>IP address</th><th>User-Agent</th><th>Action</th>
+              <th>Date / Heure</th><th>Joueur</th><th>Adresse IP</th><th>User-Agent</th><th>Action</th>
             </tr></thead>
             <tbody id="sessions-body">
-              <tr><td colspan="5" class="dim" style="padding:20px;text-align:center;">Loading...</td></tr>
+              <tr><td colspan="5" class="dim" style="padding:20px;text-align:center;">Chargement...</td></tr>
             </tbody>
           </table>
           <div class="pagination" id="sessions-pagination"></div>
         </div>
       </div>
 
-      <!-- ── Contacts ── -->
       <div id="tab-contacts" class="tab-panel">
-        <div class="section-title">// MESSAGES</div>
+        <div class="section-title">// MESSAGES REÇUS</div>
         <div class="data-table-wrap">
           <table class="data-table">
             <thead><tr>
-              <th>Date</th><th>Player</th><th>Subject</th><th>Message</th>
+              <th>Date</th><th>Joueur</th><th>Sujet</th><th>Message</th>
             </tr></thead>
             <tbody id="contacts-body">
-              <tr><td colspan="4" class="dim" style="padding:20px;text-align:center;">Loading...</td></tr>
+              <tr><td colspan="4" class="dim" style="padding:20px;text-align:center;">Chargement...</td></tr>
             </tbody>
           </table>
         </div>
@@ -211,69 +189,67 @@
   </div>
 </div>
 
-<!-- ══ Modal: Edit USD balance ══ -->
 <div class="modal-bg" id="modal-balance">
   <div class="modal">
-    <h3>⚡ EDIT USD BALANCE</h3>
-    <p style="font-size:11px;color:var(--text-dim);margin-bottom:16px;">Player: <span id="modal-balance-user" style="color:var(--amber);"></span></p>
+    <h3>⚡ Modifier les liquidités USD</h3>
+    <p style="font-size:11px;color:var(--text-dim);margin-bottom:16px;">Joueur : <span id="modal-balance-user" style="color:var(--amber);"></span></p>
     <div class="modal-field">
-      <label>New USD balance</label>
+      <label>Nouvelles liquidités USD</label>
       <input id="modal-balance-val" type="number" min="0" step="0.01" placeholder="100000.00">
     </div>
     <div class="modal-actions">
-      <button class="btn-cancel" onclick="closeModal('modal-balance')">Cancel</button>
-      <button class="btn-confirm" onclick="confirmBalance()">CONFIRM</button>
+      <button class="btn-cancel" onclick="closeModal('modal-balance')">Annuler</button>
+      <button class="btn-confirm" onclick="confirmBalance()">CONFIRMER</button>
     </div>
   </div>
 </div>
 
-<!-- ══ Modal: Edit portfolio ══ -->
 <div class="modal-bg" id="modal-portfolio">
   <div class="modal" style="border-top-color: var(--blue); width: 500px;">
-    <h3 style="color: var(--blue);">📦 PORTFOLIO — <span id="modal-portfolio-user"></span></h3>
+    <h3 style="color: var(--blue);">📦 Portefeuille de <span id="modal-portfolio-user"></span></h3>
+    
     <div class="data-table-wrap" style="margin-bottom: 20px; max-height: 250px; overflow-y: auto;">
       <table class="data-table">
         <thead>
           <tr>
-            <th>Symbol</th>
-            <th style="width: 120px;">Quantity</th>
+            <th>Symbole</th>
+            <th style="width: 120px;">Quantité</th>
             <th style="text-align: right;">Action</th>
           </tr>
         </thead>
-        <tbody id="modal-portfolio-list"></tbody>
+        <tbody id="modal-portfolio-list">
+          </tbody>
       </table>
     </div>
+
     <div style="border-top: 1px solid var(--border); padding-top: 16px;">
-      <p style="font-size:10px;color:var(--text-dim);letter-spacing:2px;margin-bottom:8px;">+ ADD NEW ASSET</p>
+      <p style="font-size:10px;color:var(--text-dim);letter-spacing:2px;margin-bottom:8px;">+ AJOUTER UN NOUVEL ACTIF</p>
       <div style="display: flex; gap: 10px;">
-        <input id="modal-portfolio-new-sym" type="text" placeholder="Symbol (e.g. SOL/USD)"
-               style="flex:1; background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 10px; font-family:monospace; text-transform:uppercase;">
-        <input id="modal-portfolio-new-qty" type="number" step="0.000001" min="0" placeholder="Quantity"
-               style="width:100px; background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 10px; font-family:monospace;">
-        <button class="btn-sm btn-sm-blue" onclick="adminUpdateAsset('new')">ADD</button>
+        <input id="modal-portfolio-new-sym" type="text" placeholder="Symbole (ex: SOL/USD)" style="flex:1; background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 10px; font-family:monospace; text-transform:uppercase;">
+        <input id="modal-portfolio-new-qty" type="number" step="0.000001" min="0" placeholder="Quantité" style="width:100px; background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 10px; font-family:monospace;">
+        <button class="btn-sm btn-sm-blue" onclick="adminUpdateAsset('new')">AJOUTER</button>
       </div>
     </div>
+
     <div class="modal-actions" style="margin-top: 24px;">
-      <button class="btn-cancel" onclick="closeModal('modal-portfolio')">Close</button>
+      <button class="btn-cancel" onclick="closeModal('modal-portfolio')">Fermer</button>
     </div>
   </div>
 </div>
 
-<!-- ══ Modal: Confirm action ══ -->
 <div class="modal-bg" id="confirm-modal">
   <div class="modal">
-    <h3>⚠ CONFIRM ACTION</h3>
+    <h3>⚠ CONFIRMER L'ACTION</h3>
     <p id="confirm-text" style="font-size:12px;color:var(--text);margin-bottom:20px;line-height:1.6;"></p>
     <div class="modal-actions">
-      <button class="btn-cancel" onclick="closeModal('confirm-modal')">Cancel</button>
-      <button class="btn-confirm" id="confirm-ok-btn">CONFIRM</button>
+      <button class="btn-cancel" onclick="closeModal('confirm-modal')">Annuler</button>
+      <button class="btn-confirm" id="confirm-ok-btn">CONFIRMER</button>
     </div>
   </div>
 </div>
 
-<!-- ══ Toast ══ -->
 <div id="toast"></div>
 
-<script src="/admin/admin.js"></script>
+<script src="script.js"></script>
 </body>
 </html>

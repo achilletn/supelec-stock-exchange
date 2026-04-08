@@ -1,6 +1,5 @@
-/* ── Fonts loaded via <link> in index.html ── */
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
 
-/* ── CSS variables ───────────────────────────────────────────────────────── */
 :root {
     --bg:        #080b0f;
     --bg2:       #0d1117;
@@ -14,9 +13,9 @@
     --blue:      #1877f2;
     --text:      #c9d1d9;
     --text-dim:  #586069;
+    --danger:    #ff3050;
 }
 
-/* ── Reset ───────────────────────────────────────────────────────────────── */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
@@ -28,7 +27,7 @@ body {
     overflow-x: hidden;
 }
 
-/* ── Scanline overlay ────────────────────────────────────────────────────── */
+/* ── Scanline overlay ── */
 body::before {
     content: '';
     position: fixed;
@@ -44,7 +43,7 @@ body::before {
     z-index: 9999;
 }
 
-/* ── Header ──────────────────────────────────────────────────────────────── */
+/* ── Header ── */
 .header {
     background: var(--bg2);
     border-bottom: 1px solid var(--border);
@@ -94,7 +93,7 @@ body::before {
     letter-spacing: 2px;
 }
 
-/* ── Login screen ────────────────────────────────────────────────────────── */
+/* ── Login ── */
 #login-screen {
     display: flex;
     align-items: center;
@@ -128,7 +127,6 @@ body::before {
 }
 
 .field-group { margin-bottom: 16px; }
-
 .field-group label {
     display: block;
     font-size: 10px;
@@ -176,7 +174,7 @@ body::before {
 
 .btn-login:hover { background: #ff5070; }
 
-/* ── Layout ──────────────────────────────────────────────────────────────── */
+/* ── Layout ── */
 #admin-screen { display: none; }
 
 .layout {
@@ -184,7 +182,7 @@ body::before {
     min-height: calc(100vh - 56px);
 }
 
-/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+/* ── Sidebar ── */
 .sidebar {
     width: 200px;
     background: var(--bg2);
@@ -228,7 +226,6 @@ body::before {
 }
 
 .nav-item:hover { color: var(--text); background: var(--bg3); }
-
 .nav-item.active {
     color: var(--green);
     border-left-color: var(--green);
@@ -237,7 +234,7 @@ body::before {
 
 .nav-icon { font-size: 14px; width: 18px; text-align: center; }
 
-/* ── Content area ────────────────────────────────────────────────────────── */
+/* ── Content ── */
 .content {
     flex: 1;
     padding: 24px;
@@ -247,7 +244,7 @@ body::before {
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
-/* ── Section titles ──────────────────────────────────────────────────────── */
+/* ── Section titles ── */
 .section-title {
     font-family: 'Orbitron', monospace;
     font-size: 11px;
@@ -267,7 +264,7 @@ body::before {
     background: linear-gradient(to right, var(--border), transparent);
 }
 
-/* ── Stat cards ──────────────────────────────────────────────────────────── */
+/* ── Stat cards ── */
 .stats-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -291,9 +288,9 @@ body::before {
     background: var(--green);
 }
 
-.stat-card.red::before   { background: var(--red); }
+.stat-card.red::before  { background: var(--red); }
 .stat-card.amber::before { background: var(--amber); }
-.stat-card.blue::before  { background: var(--blue); }
+.stat-card.blue::before { background: var(--blue); }
 
 .stat-label {
     font-size: 9px;
@@ -320,7 +317,7 @@ body::before {
     margin-top: 4px;
 }
 
-/* ── Game state box ──────────────────────────────────────────────────────── */
+/* ── Game state ── */
 .game-state-box {
     background: var(--bg2);
     border: 1px solid var(--border);
@@ -356,7 +353,6 @@ body::before {
     0%, 100% { box-shadow: 0 0 6px var(--green); }
     50%       { box-shadow: 0 0 18px var(--green); }
 }
-
 @keyframes pulse-red {
     0%, 100% { box-shadow: 0 0 6px var(--red); }
     50%       { box-shadow: 0 0 18px var(--red); }
@@ -371,6 +367,7 @@ body::before {
 
 .state-text.running { color: var(--green); }
 .state-text.stopped { color: var(--red); }
+
 .state-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 
 .btn-toggle-game {
@@ -389,7 +386,7 @@ body::before {
 .btn-toggle-game.start { background: var(--green);  color: black; }
 .btn-toggle-game:hover { filter: brightness(1.2); transform: translateY(-1px); }
 
-/* ── Data tables ─────────────────────────────────────────────────────────── */
+/* ── Tables ── */
 .data-table-wrap {
     background: var(--bg2);
     border: 1px solid var(--border);
@@ -425,7 +422,10 @@ body::before {
     letter-spacing: 1px;
 }
 
-.data-table { width: 100%; border-collapse: collapse; }
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+}
 
 .data-table th {
     padding: 10px 14px;
@@ -449,13 +449,8 @@ body::before {
 .data-table tr:last-child td { border-bottom: none; }
 .data-table tr:hover td { background: rgba(0,255,136,0.02); }
 
-/* ── Utility classes ─────────────────────────────────────────────────────── */
 .mono { font-family: 'Share Tech Mono', monospace; }
-.pos  { color: var(--green); }
-.neg  { color: var(--red); }
-.dim  { color: var(--text-dim); }
 
-/* ── Tags ────────────────────────────────────────────────────────────────── */
 .tag {
     display: inline-block;
     padding: 2px 8px;
@@ -469,7 +464,11 @@ body::before {
 .tag-sell { background: rgba(255,48,80,0.15);  color: var(--red);   border: 1px solid rgba(255,48,80,0.3); }
 .tag-usd  { background: rgba(255,170,0,0.15);  color: var(--amber); border: 1px solid rgba(255,170,0,0.3); }
 
-/* ── Action buttons ──────────────────────────────────────────────────────── */
+.pos { color: var(--green); }
+.neg { color: var(--red); }
+.dim { color: var(--text-dim); }
+
+/* ── Action buttons ── */
 .btn-sm {
     padding: 4px 10px;
     font-family: 'Share Tech Mono', monospace;
@@ -483,14 +482,13 @@ body::before {
 .btn-sm-red   { color: var(--red);   border-color: var(--red-dim); }
 .btn-sm-green { color: var(--green); border-color: var(--green-dim); }
 .btn-sm-amber { color: var(--amber); border-color: #aa7700; }
-.btn-sm-blue  { color: var(--blue);  border-color: rgba(24,119,242,0.5); }
+.btn-sm-blue  { color: var(--blue);  border-color: rgba(24, 119, 242, 0.5); }
+.btn-sm-blue:hover { background: rgba(24, 119, 242, 0.15); }
+.btn-sm-red:hover   { background: rgba(255,48,80,0.15); }
+.btn-sm-green:hover { background: rgba(0,255,136,0.1);  }
+.btn-sm-amber:hover { background: rgba(255,170,0,0.1);  }
 
-.btn-sm-red:hover   { background: rgba(255,48,80,0.15);  }
-.btn-sm-green:hover { background: rgba(0,255,136,0.1);   }
-.btn-sm-amber:hover { background: rgba(255,170,0,0.1);   }
-.btn-sm-blue:hover  { background: rgba(24,119,242,0.15); }
-
-/* ── Modals ──────────────────────────────────────────────────────────────── */
+/* ── Modal ── */
 .modal-bg {
     display: none;
     position: fixed;
@@ -522,7 +520,6 @@ body::before {
 }
 
 .modal-field { margin-bottom: 14px; }
-
 .modal-field label {
     display: block;
     font-size: 10px;
@@ -532,8 +529,7 @@ body::before {
     margin-bottom: 6px;
 }
 
-.modal-field input,
-.modal-field select {
+.modal-field input, .modal-field select {
     width: 100%;
     background: var(--bg3);
     border: 1px solid var(--border);
@@ -577,12 +573,7 @@ body::before {
 
 .btn-cancel:hover { color: var(--text); border-color: var(--text-dim); }
 
-/* ── Confirm modal overrides ─────────────────────────────────────────────── */
-#confirm-modal .modal    { border-top-color: var(--red); }
-#confirm-modal h3        { color: var(--red); }
-#confirm-modal .btn-confirm { background: var(--red); color: white; }
-
-/* ── Toast ───────────────────────────────────────────────────────────────── */
+/* ── Toast ── */
 #toast {
     position: fixed;
     bottom: 24px; right: 24px;
@@ -600,9 +591,31 @@ body::before {
 }
 
 #toast.show { opacity: 1; transform: translateY(0); }
-#toast.err  { border-left-color: var(--red); color: var(--red); }
+#toast.err { border-left-color: var(--red); color: var(--red); }
 
-/* ── Pagination ──────────────────────────────────────────────────────────── */
+/* ── Confirm modal ── */
+#confirm-modal .modal { border-top-color: var(--red); }
+#confirm-modal h3 { color: var(--red); }
+#confirm-modal .btn-confirm { background: var(--red); color: white; }
+
+/* ── Log viewer ── */
+.log-entry {
+    padding: 7px 14px;
+    border-bottom: 1px solid rgba(30,45,61,0.4);
+    font-size: 11px;
+    display: flex;
+    gap: 14px;
+    align-items: baseline;
+}
+
+.log-entry:hover { background: rgba(255,255,255,0.02); }
+
+.log-time { color: var(--text-dim); white-space: nowrap; min-width: 130px; }
+.log-user { color: var(--amber); min-width: 100px; }
+.log-action { color: var(--text); }
+.log-ip { color: var(--text-dim); font-size: 10px; margin-left: auto; }
+
+/* ── Pagination ── */
 .pagination {
     display: flex;
     align-items: center;
@@ -622,26 +635,25 @@ body::before {
     cursor: pointer;
 }
 
-.page-btn:hover        { color: var(--green); border-color: var(--green-dim); }
-.page-btn.active       { color: var(--green); border-color: var(--green); background: rgba(0,255,136,0.07); }
+.page-btn:hover { color: var(--green); border-color: var(--green-dim); }
+.page-btn.active { color: var(--green); border-color: var(--green); background: rgba(0,255,136,0.07); }
 
-/* ── Inline editable value ───────────────────────────────────────────────── */
+/* ── Inline edit ── */
 .editable-val {
     cursor: pointer;
     border-bottom: 1px dashed var(--text-dim);
     transition: border-color 0.2s;
 }
-
 .editable-val:hover { border-color: var(--amber); color: var(--amber); }
 
-/* ── Scrollbar ───────────────────────────────────────────────────────────── */
-::-webkit-scrollbar       { width: 6px; height: 6px; }
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 
-/* ── Responsive ──────────────────────────────────────────────────────────── */
+/* ── Responsive ── */
 @media (max-width: 900px) {
-    .sidebar     { width: 160px; }
-    .stats-grid  { grid-template-columns: 1fr 1fr; }
+    .sidebar { width: 160px; }
+    .stats-grid { grid-template-columns: 1fr 1fr; }
 }
