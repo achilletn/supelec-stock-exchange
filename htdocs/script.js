@@ -10,8 +10,12 @@ let prixActuel = 0;
 
 const tickHandlers = new Set();
 const syncClockHandles = {};
-const GRAPH_REFRESH_RATE = 3;
+const GRAPH_REFRESH_RATE = 1;
 const cacheGraphique = {};
+
+let CYCLE_MS = 65000;         // mis à jour depuis /api/sync-status
+let masterTickTimeout = null; // timeout du premier tick aligné
+let masterTickStarted = false;
 
 const formateurDevise = new Intl.NumberFormat('fr-FR', {
     style: 'currency',
@@ -22,17 +26,43 @@ const formateurDevise = new Intl.NumberFormat('fr-FR', {
 });
 
 function startMasterTick() {
-    if (masterTickInterval) return;
-    masterTickInterval = setInterval(() => {
+    if (masterTickStarted) return;
+    masterTickStarted = true;
+
+    const tick = () => {
         lastTickTime = performance.now();
         tickCount++;
         tickHandlers.forEach(fn => fn(tickCount));
-    }, 5000);
+    };
+
+    fetch('/api/sync-status')
+        .then(r => r.json())
+        .then(d => {
+            CYCLE_MS = d.cycle_ms || 65000;
+            const elapsed = d.last_update_ms > 0 ? Date.now() - d.last_update_ms : 0;
+            const remaining = CYCLE_MS - (elapsed % CYCLE_MS);
+
+            // Positionne le cercle au bon endroit dans le cycle serveur
+            lastTickTime = performance.now() - (elapsed % CYCLE_MS);
+
+            // Premier tick exactement quand le serveur se met à jour
+            masterTickTimeout = setTimeout(() => {
+                masterTickTimeout = null;
+                tick();
+                masterTickInterval = setInterval(tick, CYCLE_MS);
+            }, remaining);
+        })
+        .catch(() => {
+            // Fallback si l'endpoint est indisponible
+            masterTickInterval = setInterval(tick, CYCLE_MS);
+        });
 }
 
 function stopMasterTick() {
+    if (masterTickTimeout) { clearTimeout(masterTickTimeout); masterTickTimeout = null; }
     clearInterval(masterTickInterval);
     masterTickInterval = null;
+    masterTickStarted = false;
 }
 
 function tickGraphique(tick) {
@@ -324,7 +354,7 @@ function startSyncClock(canvasId) {
     const canvas = document.getElementById(canvasId);
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
-    const TICK = 5000;
+    const TICK = CYCLE_MS;
     let resetting = false;
 
     function draw(now) {

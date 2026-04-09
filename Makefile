@@ -18,10 +18,10 @@ compile:
 	@echo "🔨 Compilation du serveur C++..."
 	$(CXX) serveur.cpp $(CXXFLAGS) -o $(TARGET) $(LIBS)
 
-# 3. Lancer le serveur
+# 3. Lancer le serveur (charge .env si présent)
 run:
 	@echo "🚀 Lancement du serveur..."
-	./$(TARGET)
+	@if [ -f .env ]; then export $$(cat .env | grep -v '^#' | xargs) && ./$(TARGET); else ./$(TARGET); fi
 
 # Optionnel : pour nettoyer les fichiers binaires
 clean:

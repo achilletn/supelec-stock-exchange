@@ -7,15 +7,71 @@
 #include <thread>
 #include <mutex>
 #include <map>
+#include <vector>
+#include <sstream>
+#include <iomanip>
+#include <cstdlib>
+#include <chrono>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 
 using json = nlohmann::json;
 
-// TODO SECURITY: Utiliser des variables d'environnement au lieu de les mettre en dur.
-static const std::string ADMIN_USER = "goudale";
-static const std::string ADMIN_PASS = "forceaumecdubush";
+static std::string ADMIN_USER;
+static std::string ADMIN_PASS;
+static std::string TWELVEDATA_API_KEY;
 static const std::string ADMIN_COOKIE = "admin_session";
  
 std::atomic<bool> isGameRunning{true};
+std::atomic<long long> lastMarketUpdateMs{0};
+
+// ── Brute-force protection ────────────────────────────────────────────────
+static const int BF_MAX_ATTEMPTS = 5;    // tentatives avant blocage
+static const int BF_WINDOW_SEC   = 300;  // fenêtre de comptage (5 min)
+static const int BF_BLOCK_SEC    = 900;  // durée de blocage (15 min)
+
+struct BruteForceEntry {
+    int attempts = 0;
+    std::chrono::steady_clock::time_point first_attempt;
+    std::chrono::steady_clock::time_point blocked_until;
+};
+static std::map<std::string, BruteForceEntry> bruteForceMap;
+static std::mutex bruteforceMutex;
+
+static bool isRateLimited(const std::string& ip) {
+    std::lock_guard<std::mutex> lock(bruteforceMutex);
+    auto it = bruteForceMap.find(ip);
+    if (it == bruteForceMap.end()) return false;
+    auto& e = it->second;
+    auto now = std::chrono::steady_clock::now();
+    if (now < e.blocked_until) return true;
+    // Fenêtre expirée → on repart à zéro
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - e.first_attempt).count() > BF_WINDOW_SEC)
+        bruteForceMap.erase(it);
+    return false;
+}
+
+static void recordFailedAttempt(const std::string& ip) {
+    std::lock_guard<std::mutex> lock(bruteforceMutex);
+    auto now = std::chrono::steady_clock::now();
+    auto& e = bruteForceMap[ip];
+    // Réinitialise si la fenêtre est expirée
+    if (e.attempts > 0 &&
+        std::chrono::duration_cast<std::chrono::seconds>(now - e.first_attempt).count() > BF_WINDOW_SEC)
+        e = BruteForceEntry{};
+    if (e.attempts == 0) e.first_attempt = now;
+    e.attempts++;
+    if (e.attempts >= BF_MAX_ATTEMPTS) {
+        e.blocked_until = now + std::chrono::seconds(BF_BLOCK_SEC);
+        std::cout << "[SECURITY] IP " << ip << " bloquée (bruteforce, "
+                  << BF_MAX_ATTEMPTS << " échecs)." << std::endl;
+    }
+}
+
+static void clearFailedAttempts(const std::string& ip) {
+    std::lock_guard<std::mutex> lock(bruteforceMutex);
+    bruteForceMap.erase(ip);
+}
 
 struct ActionItem { std::string nom; double prix; double variation_24h; };
 std::map<std::string, ActionItem> marcheMondial;
@@ -40,37 +96,133 @@ static int getUserId(sqlite3* db, const std::string& username) {
     return id;
 }
 
-static std::string getCookieUser(const httplib::Request& req) {
+// Extrait la valeur d'un cookie par son nom
+static std::string getCookieValue(const httplib::Request& req, const std::string& name) {
     if (!req.has_header("Cookie")) return "";
     const std::string cookies = req.get_header_value("Cookie");
-    size_t pos = cookies.find("auth_user=");
+    std::string search = name + "=";
+    size_t pos = cookies.find(search);
     if (pos == std::string::npos) return "";
-    size_t start = pos + 10;
+    size_t start = pos + search.size();
     size_t end = cookies.find(";", start);
     return cookies.substr(start, end - start);
 }
 
-// TODO SECURITY: Implémenter bcrypt/argon2 ici. Ne jamais stocker en clair.
-static bool verifyPassword(const std::string& inputPassword, const std::string& storedHash) {
-    return inputPassword == storedHash; // À remplacer par bcrypt_check()
+// Résout le token de session en nom d'utilisateur (lookup DB)
+static std::string getCookieUser(const httplib::Request& req) {
+    std::string token = getCookieValue(req, "auth_session");
+    if (token.empty()) return "";
+
+    sqlite3* db = openDatabase();
+    std::string username;
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db,
+        "SELECT username FROM user_sessions WHERE token = ? AND expires_at > datetime('now');",
+        -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            username = (const char*)sqlite3_column_text(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return username;
 }
 
-static std::string hashPassword(const std::string& plainPassword) {
-    return plainPassword; // À remplacer par bcrypt_hash()
+// ── Password hashing (PBKDF2-SHA256 via OpenSSL) ─────────────────────────
+
+static std::string toHex(const unsigned char* data, size_t len) {
+    std::ostringstream ss;
+    for (size_t i = 0; i < len; i++)
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)data[i];
+    return ss.str();
+}
+
+static std::vector<unsigned char> fromHex(const std::string& hex) {
+    std::vector<unsigned char> bytes;
+    for (size_t i = 0; i + 1 < hex.size(); i += 2)
+        bytes.push_back((unsigned char)std::stoi(hex.substr(i, 2), nullptr, 16));
+    return bytes;
+}
+
+static std::string generateToken() {
+    unsigned char buf[32];
+    RAND_bytes(buf, 32);
+    return toHex(buf, 32);
+}
+
+// Format stocké : pbkdf2:<iterations>:<salt_hex>:<hash_hex>
+static std::string hashPassword(const std::string& plain) {
+    const int ITERATIONS = 100000;
+    const int SALT_LEN   = 16;
+    const int HASH_LEN   = 32;
+    unsigned char salt[SALT_LEN], hash[HASH_LEN];
+    RAND_bytes(salt, SALT_LEN);
+    PKCS5_PBKDF2_HMAC(plain.c_str(), (int)plain.size(),
+                      salt, SALT_LEN, ITERATIONS, EVP_sha256(),
+                      HASH_LEN, hash);
+    return "pbkdf2:" + std::to_string(ITERATIONS) + ":" +
+           toHex(salt, SALT_LEN) + ":" + toHex(hash, HASH_LEN);
+}
+
+static bool verifyPassword(const std::string& plain, const std::string& stored) {
+    // Compatibilité migration : anciens mots de passe en clair
+    if (stored.find("pbkdf2:") != 0)
+        return plain == stored;
+
+    // Parser pbkdf2:<iter>:<salt_hex>:<hash_hex>
+    std::istringstream ss(stored);
+    std::string tag, iterStr, saltHex, hashHex;
+    std::getline(ss, tag,     ':');
+    std::getline(ss, iterStr, ':');
+    std::getline(ss, saltHex, ':');
+    std::getline(ss, hashHex);
+    if (saltHex.empty() || hashHex.empty()) return false;
+
+    int iterations = std::stoi(iterStr);
+    auto salt      = fromHex(saltHex);
+    auto expected  = fromHex(hashHex);
+    const int HASH_LEN = 32;
+    if ((int)expected.size() != HASH_LEN) return false;
+
+    unsigned char computed[HASH_LEN];
+    PKCS5_PBKDF2_HMAC(plain.c_str(), (int)plain.size(),
+                      salt.data(), (int)salt.size(),
+                      iterations, EVP_sha256(), HASH_LEN, computed);
+
+    // Comparaison en temps constant pour éviter les timing attacks
+    unsigned char diff = 0;
+    for (int i = 0; i < HASH_LEN; i++) diff |= computed[i] ^ expected[i];
+    return diff == 0;
 }
 
 static bool verifyLogin(const std::string& user, const std::string& pass) {
     sqlite3* db = openDatabase();
     bool valid = false;
+    bool needsUpgrade = false;
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db, "SELECT password FROM utilisateurs WHERE username = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::string storedPass = (const char*)sqlite3_column_text(stmt, 0);
-            valid = verifyPassword(pass, storedPass);
+            std::string stored = (const char*)sqlite3_column_text(stmt, 0);
+            valid = verifyPassword(pass, stored);
+            needsUpgrade = valid && stored.find("pbkdf2:") != 0;
         }
     }
     sqlite3_finalize(stmt);
+
+    // Migration automatique des anciens mots de passe en clair
+    if (needsUpgrade) {
+        std::string newHash = hashPassword(pass);
+        sqlite3_stmt* upd;
+        if (sqlite3_prepare_v2(db, "UPDATE utilisateurs SET password = ? WHERE username = ?;", -1, &upd, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(upd, 1, newHash.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(upd, 2, user.c_str(), -1, SQLITE_STATIC);
+            sqlite3_step(upd);
+        }
+        sqlite3_finalize(upd);
+        std::cout << "[SECURITY] Mot de passe de '" << user << "' migré vers PBKDF2." << std::endl;
+    }
+
     sqlite3_close(db);
     return valid;
 }
@@ -83,7 +235,7 @@ static bool registerUser(const std::string& user, const std::string& pass, const
     if (sqlite3_prepare_v2(db, "INSERT INTO utilisateurs (username, telephone, password, statut) VALUES (?, ?, ?, 'pending');", -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 2, tel.c_str(), -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 3, pass.c_str(), -1, SQLITE_STATIC); // Pense au hashage !
+        sqlite3_bind_text(stmt, 3, hashPassword(pass).c_str(), -1, SQLITE_TRANSIENT);
         
         if (sqlite3_step(stmt) == SQLITE_DONE) ok = true;
     }
@@ -95,71 +247,81 @@ static bool registerUser(const std::string& user, const std::string& pass, const
 // ── Workers ───────────────────────────────────────────────────────────────
 
 void workerActualiserCours() {
-    std::vector<std::string> mesActifs = {"BTC/USD", "ETH/USD", "BNB/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "ADA/USD", "AVAX/USD"};
+    // Liste des actifs à suivre — 8 max pour rester dans le quota (8 calls/min)
+    const std::vector<std::string> mesActifs = {
+        "AAPL", "MSFT", "NVDA", "TSLA", "GOOGL", "AMZN", "META", "NFLX"
+    };
+
+    // Construire la chaîne "AAPL,MSFT,..." pour la requête batch
+    std::string symbols;
+    for (size_t i = 0; i < mesActifs.size(); ++i)
+        symbols += mesActifs[i] + (i < mesActifs.size() - 1 ? "," : "");
 
     while (true) {
         try {
-            httplib::Client cli("https://api.binance.com");
-            
-            // 1. Convertir "BTC/USD" en "BTCUSDT" et construire l'URL Binance
-            // Format attendu dans l'URL : %5B%22BTCUSDT%22%2C%22ETHUSDT%22%5D
-            std::string symbolsEncoded = "%5B";
-            for (size_t i = 0; i < mesActifs.size(); ++i) {
-                std::string bSym = mesActifs[i];
-                size_t pos = bSym.find("/USD");
-                if (pos != std::string::npos) {
-                    bSym.replace(pos, 4, "USDT"); // Transforme "BTC/USD" en "BTCUSDT"
-                }
-                
-                symbolsEncoded += "%22" + bSym + "%22";
-                if (i < mesActifs.size() - 1) symbolsEncoded += "%2C";
-            }
-            symbolsEncoded += "%5D";
+            httplib::Client cli("https://api.twelvedata.com");
+            cli.set_connection_timeout(10);
+            cli.set_read_timeout(10);
 
-            std::string path = "/api/v3/ticker/24hr?symbols=" + symbolsEncoded;
+            // 1 requête batch = 8 credits (1 par symbole)
+            std::string path = "/quote?symbol=" + symbols + "&apikey=" + TWELVEDATA_API_KEY;
             auto res = cli.Get(path.c_str());
 
             if (res && res->status == 200) {
                 auto j = json::parse(res->body);
 
-                if (j.is_array()) {
+                // Vérification quota dépassé (code 429 dans le body)
+                if (j.contains("code") && j["code"] == 429) {
+                    std::cout << "[QUOTA] Limite TwelveData atteinte, pause forcée." << std::endl;
+                } else {
                     std::lock_guard<std::mutex> lock(marcheMutex);
-                    
-                    for (const auto& item : j) {
-                        std::string bSymbol = item["symbol"].get<std::string>();
-                        
-                        // 2. Reconvertir "BTCUSDT" en "BTC/USD" pour ton dictionnaire local
-                        std::string sym = bSymbol;
-                        size_t pos = sym.find("USDT");
-                        if (pos != std::string::npos) {
-                            sym.replace(pos, 4, "/USD");
+
+                    for (auto it = j.begin(); it != j.end(); ++it) {
+                        const std::string& sym = it.key();
+                        const auto& data = it.value();
+
+                        if (!data.is_object() || !data.contains("close")) {
+                            std::cout << "  [SKIP] " << sym << " : données manquantes" << std::endl;
+                            continue;
                         }
 
-                        // 3. Mettre à jour marcheMondial (traité comme une action)
-                        if (item.contains("lastPrice")) {
-                            double p = std::stod(item["lastPrice"].get<std::string>());
-                            marcheMondial[sym].prix = p;
-                            
-                            // Binance ne renvoie pas de nom complet ici, on garde le Ticker (ex: "BTC")
-                            marcheMondial[sym].nom = sym.substr(0, sym.find("/"));
-                            
-                            if (item.contains("priceChangePercent")) {
-                                marcheMondial[sym].variation_24h = std::stod(item["priceChangePercent"].get<std::string>());
-                            }
-                            std::cout << "  [OK] " << sym << " mis à jour." << std::endl;
+                        try {
+                            double prix = std::stod(data["close"].get<std::string>());
+                            if (prix <= 0.0) continue;
+
+                            marcheMondial[sym].prix = prix;
+                            marcheMondial[sym].nom  = data.value("name", sym);
+
+                            if (data.contains("percent_change"))
+                                marcheMondial[sym].variation_24h = std::stod(data["percent_change"].get<std::string>());
+
+                            std::cout << "  [OK] " << sym << " = " << prix << " $" << std::endl;
+                        } catch (...) {
+                            std::cout << "  [SKIP] " << sym << " : parsing échoué" << std::endl;
                         }
                     }
+
+                    // Horodatage de la dernière mise à jour réussie (ms depuis epoch)
+                    lastMarketUpdateMs.store(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()
+                        ).count()
+                    );
                 }
             } else if (res) {
-                std::cout << "[ERREUR BINANCE] Code : " << res->status << std::endl;
+                std::cout << "[ERREUR TWELVEDATA] HTTP " << res->status << std::endl;
+                std::cout << "[ERREUR TWELVEDATA] Body : " << res->body << std::endl;
+            } else {
+                auto err = res.error();
+                std::cout << "[ERREUR TWELVEDATA] Pas de réponse : " << httplib::to_string(err) << std::endl;
             }
         } catch (const std::exception& e) {
             std::cout << "  [EXCEPTION] " << e.what() << std::endl;
         }
 
-        // L'API Binance est ultra permissive, on peut rafraîchir toutes les 10 secondes
-        std::cout << "[INFO] Cycle fini. Pause de 10s..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+        // 8 symboles = 8 credits — on attend 65s pour rester sous 8 calls/min
+        std::cout << "[INFO] Cycle fini. Pause de 65s..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(65));
     }
 }
 
@@ -186,6 +348,22 @@ static double calculerValeurPortefeuille(sqlite3* db, int uid) {
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
+    // Chargement des credentials admin depuis les variables d'environnement
+    const char* envUser   = std::getenv("ADMIN_USER");
+    const char* envPass   = std::getenv("ADMIN_PASS");
+    const char* envApiKey = std::getenv("TWELVEDATA_API_KEY");
+    if (!envUser || !envPass || std::string(envUser).empty() || std::string(envPass).empty()) {
+        std::cerr << "[FATAL] Les variables d'environnement ADMIN_USER et ADMIN_PASS doivent être définies." << std::endl;
+        return 1;
+    }
+    if (!envApiKey || std::string(envApiKey).empty()) {
+        std::cerr << "[FATAL] La variable d'environnement TWELVEDATA_API_KEY doit être définie." << std::endl;
+        return 1;
+    }
+    ADMIN_USER         = envUser;
+    ADMIN_PASS         = envPass;
+    TWELVEDATA_API_KEY = envApiKey;
+
     sqlite3* db = openDatabase();
     
     // Initialisation DB
@@ -216,6 +394,17 @@ int main() {
         CREATE TABLE IF NOT EXISTS trades_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, action TEXT, symbole TEXT, quantite REAL, prix REAL, valeur REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES utilisateurs(id));
         CREATE TABLE IF NOT EXISTS sessions_log (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, ip TEXT, user_agent TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            token TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            expires_at DATETIME NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS admin_sessions (
+            token TEXT PRIMARY KEY,
+            expires_at DATETIME NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         INSERT OR IGNORE INTO actifs (symbole, nom, type) VALUES ('USD','Dollar Americain','fiat'),('BTCUSDT','Bitcoin','crypto'),('ETHUSDT','Ethereum','crypto');
         INSERT OR IGNORE INTO config (key, value) VALUES ('game_running', '1');
     )";
@@ -280,6 +469,17 @@ int main() {
         }
     }).detach();
 
+    // Routine : Nettoyage des sessions expirées (toutes les heures)
+    std::thread([]() {
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::hours(1));
+            sqlite3* db = openDatabase();
+            sqlite3_exec(db, "DELETE FROM user_sessions  WHERE expires_at <= datetime('now');", nullptr, 0, nullptr);
+            sqlite3_exec(db, "DELETE FROM admin_sessions WHERE expires_at <= datetime('now');", nullptr, 0, nullptr);
+            sqlite3_close(db);
+        }
+    }).detach();
+
     httplib::Server svr;
 
     svr.Get("/favicon.ico", [](const httplib::Request&, httplib::Response& res) {
@@ -294,6 +494,11 @@ int main() {
         std::lock_guard<std::mutex> lock(marcheMutex);
         for (auto& [key, val] : marcheMondial)
             j.push_back({ {"symbol", key}, {"price", val.prix}, {"variation_24h", val.variation_24h} });
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Get("/api/sync-status", [](const httplib::Request&, httplib::Response& res) {
+        json j = { {"last_update_ms", lastMarketUpdateMs.load()}, {"cycle_ms", 65000} };
         res.set_content(j.dump(), "application/json");
     });
 
@@ -372,11 +577,20 @@ int main() {
     });
 
     svr.Post("/api/login", [](const httplib::Request& req, httplib::Response& res) {
+        const std::string ip = req.remote_addr;
+
+        if (isRateLimited(ip)) {
+            res.status = 429;
+            res.set_content("{\"erreur\":\"Trop de tentatives échouées. Réessayez dans 15 minutes.\"}", "application/json");
+            return;
+        }
+
         std::string user = req.get_param_value("user");
         std::string pass = req.get_param_value("pass");
 
         // 1. Vérification classique du mot de passe
         if (verifyLogin(user, pass)) {
+            clearFailedAttempts(ip);
             
             // 2. Vérification du statut d'approbation
             sqlite3* db = openDatabase();
@@ -399,9 +613,20 @@ int main() {
                 return;
             }
 
-            // 4. Si tout est OK, on connecte le joueur (Log session + Cookie)
-            res.set_header("Set-Cookie", "auth_user=" + user + "; Path=/; HttpOnly; SameSite=Strict");
-            
+            // 4. Si tout est OK : créer un token de session sécurisé (7 jours)
+            std::string token = generateToken();
+            sqlite3_stmt* stok;
+            if (sqlite3_prepare_v2(db,
+                "INSERT INTO user_sessions (token, username, expires_at) VALUES (?, ?, datetime('now', '+7 days'));",
+                -1, &stok, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stok, 1, token.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_text(stok, 2, user.c_str(), -1, SQLITE_STATIC);
+                sqlite3_step(stok);
+            }
+            sqlite3_finalize(stok);
+
+            res.set_header("Set-Cookie", "auth_session=" + token + "; Path=/; HttpOnly; SameSite=Strict");
+
             sqlite3_stmt* ls;
             if (sqlite3_prepare_v2(db, "INSERT INTO sessions_log (username, ip, user_agent, action) VALUES (?, ?, ?, 'login');", -1, &ls, nullptr) == SQLITE_OK) {
                 sqlite3_bind_text(ls, 1, user.c_str(), -1, SQLITE_STATIC);
@@ -410,19 +635,30 @@ int main() {
                 sqlite3_step(ls);
             }
             sqlite3_finalize(ls);
-            sqlite3_close(db);    
-            
+            sqlite3_close(db);
+
             res.set_content("{\"status\":\"ok\"}", "application/json");
             
         } else {
-            // Mauvais mot de passe ou pseudo
+            recordFailedAttempt(ip);
             res.status = 401;
             res.set_content("{\"erreur\":\"Identifiants incorrects\"}", "application/json");
         }
     });
 
-    svr.Post("/api/logout", [](const httplib::Request&, httplib::Response& res) {
-        res.set_header("Set-Cookie", "auth_user=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+    svr.Post("/api/logout", [](const httplib::Request& req, httplib::Response& res) {
+        std::string token = getCookieValue(req, "auth_session");
+        if (!token.empty()) {
+            sqlite3* db = openDatabase();
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db, "DELETE FROM user_sessions WHERE token = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
+                sqlite3_step(stmt);
+            }
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+        res.set_header("Set-Cookie", "auth_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
         res.set_content("{\"status\":\"deconnecte\"}", "application/json");
     });
 
@@ -434,24 +670,29 @@ int main() {
         std::string periode = req.has_param("periode") ? req.get_param_value("periode") : "24h";
         std::string depuis  = req.has_param("depuis")  ? req.get_param_value("depuis")  : "";
 
-        std::string modTemps = "-24 hours", fmtDate = "'%H:%M'";
-        if (periode == "1h") { modTemps = "-1 hour"; fmtDate = "'%H:%M:%S'"; }
-        else if (periode == "7d") { modTemps = "-7 days"; fmtDate = "'%d/%m %H:00'"; }
+        // Whitelist stricte sur la période — pas de concaténation dans le SQL
+        if (periode != "1h" && periode != "24h" && periode != "7d") periode = "24h";
+
+        // Requêtes SQL entièrement statiques, sélectionnées par période
+        static const char* SQL_DEPUIS_1H  = "SELECT prix, strftime('%H:%M:%S', timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp > ? ORDER BY timestamp ASC;";
+        static const char* SQL_DEPUIS_24H = "SELECT prix, strftime('%H:%M',    timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp > ? ORDER BY timestamp ASC;";
+        static const char* SQL_DEPUIS_7D  = "SELECT prix, strftime('%d/%m %H:00', timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp > ? ORDER BY timestamp ASC;";
+        static const char* SQL_1H  = "SELECT prix, strftime('%H:%M:%S', timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp >= datetime('now', '-1 hour')  ORDER BY timestamp ASC;";
+        static const char* SQL_24H = "SELECT prix, strftime('%H:%M',    timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp >= datetime('now', '-24 hours') ORDER BY timestamp ASC;";
+        static const char* SQL_7D  = "SELECT prix, strftime('%d/%m %H:00', timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp >= datetime('now', '-7 days')  ORDER BY timestamp ASC;";
+
+        const char* sql;
+        if (!depuis.empty()) {
+            sql = (periode == "1h") ? SQL_DEPUIS_1H : (periode == "7d") ? SQL_DEPUIS_7D : SQL_DEPUIS_24H;
+        } else {
+            sql = (periode == "1h") ? SQL_1H : (periode == "7d") ? SQL_7D : SQL_24H;
+        }
 
         sqlite3* db = openDatabase();
         sqlite3_stmt* stmt;
         json j = json::array();
 
-        std::string sql;
-        if (!depuis.empty()) {
-            sql = "SELECT prix, strftime(" + fmtDate + ", timestamp), timestamp FROM historique "
-                  "WHERE symbole = ? AND timestamp > ? ORDER BY timestamp ASC;";
-        } else {
-            sql = "SELECT prix, strftime(" + fmtDate + ", timestamp), timestamp FROM historique "
-                  "WHERE symbole = ? AND timestamp >= datetime('now', '" + modTemps + "') ORDER BY timestamp ASC;";
-        }
-
-        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, symbole.c_str(), -1, SQLITE_STATIC);
             if (!depuis.empty()) sqlite3_bind_text(stmt, 2, depuis.c_str(), -1, SQLITE_STATIC);
             
@@ -730,9 +971,20 @@ int main() {
 
     // ── Helper Admin ──────────────────────────────────────────────────────────
     auto isAdmin = [](const httplib::Request& req) -> bool {
-        if (!req.has_header("Cookie")) return false;
-        const std::string c = req.get_header_value("Cookie");
-        return c.find(std::string(ADMIN_COOKIE) + "=1") != std::string::npos;
+        std::string token = getCookieValue(req, ADMIN_COOKIE);
+        if (token.empty()) return false;
+        sqlite3* db = openDatabase();
+        bool ok = false;
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM admin_sessions WHERE token = ? AND expires_at > datetime('now');",
+            -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
+            ok = (sqlite3_step(stmt) == SQLITE_ROW);
+        }
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return ok;
     };
     
     // ── Espace Admin ──────────────────────────────────────────────────────────
@@ -745,13 +997,35 @@ int main() {
     });
     
     svr.Post("/api/admin/login", [](const httplib::Request& req, httplib::Response& res) {
+        const std::string ip = req.remote_addr;
+
+        if (isRateLimited(ip)) {
+            res.status = 429;
+            res.set_content("{\"erreur\":\"Trop de tentatives. Réessayez dans 15 minutes.\"}", "application/json");
+            return;
+        }
+
         std::string u = req.get_param_value("user");
         std::string p = req.get_param_value("pass");
         if (u == ADMIN_USER && p == ADMIN_PASS) {
-            res.set_header("Set-Cookie", std::string(ADMIN_COOKIE) + "=1; Path=/; HttpOnly; SameSite=Strict");
+            clearFailedAttempts(ip);
+            std::string token = generateToken();
+            sqlite3* db = openDatabase();
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db,
+                "INSERT INTO admin_sessions (token, expires_at) VALUES (?, datetime('now', '+8 hours'));",
+                -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
+                sqlite3_step(stmt);
+            }
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+            res.set_header("Set-Cookie", std::string(ADMIN_COOKIE) + "=" + token + "; Path=/; HttpOnly; SameSite=Strict");
             res.set_content("{\"status\":\"ok\"}", "application/json");
         } else {
-            res.status = 401; res.set_content("{\"erreur\":\"Accès refusé\"}", "application/json");
+            recordFailedAttempt(ip);
+            res.status = 401;
+            res.set_content("{\"erreur\":\"Accès refusé\"}", "application/json");
         }
     });
     
@@ -760,7 +1034,18 @@ int main() {
         else { res.status = 401; res.set_content("{\"ok\":false}", "application/json"); }
     });
     
-    svr.Post("/api/admin/logout", [](const httplib::Request&, httplib::Response& res) {
+    svr.Post("/api/admin/logout", [](const httplib::Request& req, httplib::Response& res) {
+        std::string token = getCookieValue(req, ADMIN_COOKIE);
+        if (!token.empty()) {
+            sqlite3* db = openDatabase();
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db, "DELETE FROM admin_sessions WHERE token = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
+                sqlite3_step(stmt);
+            }
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
         res.set_header("Set-Cookie", std::string(ADMIN_COOKIE) + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
         res.set_content("{\"status\":\"ok\"}", "application/json");
     });
@@ -1026,14 +1311,26 @@ int main() {
         
         // On passe le statut à 'approved' ET on lui donne ses 100 000$ de départ
         sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, 0, nullptr);
-        std::string sql1 = "UPDATE utilisateurs SET statut = 'approved' WHERE id = " + std::to_string(uid) + ";";
-        std::string sql2 = "INSERT OR IGNORE INTO portefeuilles (user_id, symbole, quantite) VALUES (" + std::to_string(uid) + ", 'USD', 100000.0);";
-        
-        sqlite3_exec(db, sql1.c_str(), nullptr, 0, nullptr);
-        sqlite3_exec(db, sql2.c_str(), nullptr, 0, nullptr);
+
+        sqlite3_stmt* s1;
+        if (sqlite3_prepare_v2(db, "UPDATE utilisateurs SET statut = 'approved' WHERE id = ?;",
+                               -1, &s1, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(s1, 1, uid);
+            sqlite3_step(s1);
+        }
+        sqlite3_finalize(s1);
+
+        sqlite3_stmt* s2;
+        if (sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO portefeuilles (user_id, symbole, quantite) VALUES (?, 'USD', 100000.0);",
+                               -1, &s2, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(s2, 1, uid);
+            sqlite3_step(s2);
+        }
+        sqlite3_finalize(s2);
+
         sqlite3_exec(db, "COMMIT;", nullptr, 0, nullptr);
         sqlite3_close(db);
-        
+
         res.set_content("{\"status\":\"ok\"}", "application/json");
     });
 
