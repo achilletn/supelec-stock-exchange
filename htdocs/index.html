@@ -46,9 +46,15 @@
         <nav class="game-nav">
             <button onclick="switchTab('marche')">Marché</button>
             <button onclick="switchTab('classement')">Classement</button>
-            <button onclick="switchTab('portefeuille')">Portefeuille</button>
+            <button onclick="portfolioJoueurCible=null; switchTab('portefeuille')">Portefeuille</button>
             <button onclick="switchTab('propos')">A propos</button>
             <button onclick="seDeconnecter()">Se déconnecter</button>
+            <div class="game-nav-right">
+                <label class="dark-toggle" onclick="toggleDarkMode()">
+                    <span>🌙</span>
+                    <div class="dark-toggle-track"><div class="dark-toggle-thumb"></div></div>
+                </label>
+            </div>
         </nav>
 
         <div class="user-dashboard-header">
@@ -63,10 +69,6 @@
             <div class="dash-item">
                 <span class="dash-label">💵 LIQUIDITÉS</span>
                 <span id="dash-usd" class="dash-value">0.00 $</span>
-            </div>
-            <div class="dash-item">
-                <span class="dash-label">📊 PNL 24H</span>
-                <span id="dash-pnl24h" class="dash-value">—</span>
             </div>
             <div class="dash-item">
                 <span class="dash-label">📈 PNL TOTAL</span>
@@ -96,7 +98,7 @@
                                     <th>Symbole</th>
                                     <th>Prix</th>
                                     <th>Variation 24H</th>
-                                    <th>Action</th>
+                                    <th style="text-align:center;">Action</th>
                                 </tr>
                             </thead>
                             <tbody id="market-body">
@@ -105,34 +107,6 @@
                         </table>
                     </div>
 
-                    <div class="colonne-detail" id="panneau-detail" style="display: none;">
-                        <div class="detail-header">
-                            <h2 id="detail-titre" style="margin: 0;">Symbole</h2>
-                            <button class="btn-fermer" onclick="fermerDetail()">✖</button>
-                        </div>
-                        
-                        <div class="prix-gros" id="detail-prix">0.00 $</div>
-
-                        <div class="timeframe-selector">
-                            <button id="btn-1h" class="btn-time" onclick="changerFenetre('1h')">1 Heure</button>
-                            <button id="btn-24h" class="btn-time active" onclick="changerFenetre('24h')">24 Heures</button>
-                            <button id="btn-7d" class="btn-time" onclick="changerFenetre('7d')">7 Jours</button>
-                        </div>
-
-                        <div style="width: 100%; height: 250px; margin: 15px 0;">
-                            <canvas id="graphique-actif"></canvas>
-                        </div>
-
-                        <div class="trade-box">
-                            <input type="number" id="trade-quantite" placeholder="Qté" min="0.01" step="0.01" style="width: 80px;">
-                            <button class="btn-achat" onclick="passerOrdre('achat')">Acheter</button>
-                            <button class="btn-vente" onclick="passerOrdre('vente')">Vendre</button>
-                        </div>
-                        <div id="trade-estimation" style="display:none; margin-top: 15px; font-size: 0.9em; background: #e9ecef; padding: 12px; border-radius: 6px; border-left: 4px solid #f39c12;">
-                        </div>
-
-                        <p id="trade-message" style="margin-top:10px; font-weight:bold; font-size: 0.9em;"></p>
-                    </div>
                 </div>
             </section>
 
@@ -160,11 +134,41 @@
 
             <section id="tab-portefeuille" class="tab-content" style="display:none;">
                 <div class="market-header">
-                    <h2>Portefeuille du joueur</h2>
-                    <div id="sync-status-portefeuille" class="sync-status">
-                        <canvas id="sync-clock-portefeuille" width="28" height="28"></canvas>
-                        <span class="status-ok">Synchronisation</span>
+                    <h2 id="portefeuille-titre">Portefeuille du joueur</h2>
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <button id="btn-retour-classement" onclick="retourClassement()" style="display:none;" class="btn-retour">← Classement</button>
+                        <div id="sync-status-portefeuille" class="sync-status">
+                            <canvas id="sync-clock-portefeuille" width="28" height="28"></canvas>
+                            <span class="status-ok">Synchronisation</span>
+                        </div>
                     </div>
+                </div>
+                <div id="portfolio-joueur-summary" style="display:none;" class="joueur-profil-card">
+                    <div class="joueur-profil-stat">
+                        <span class="joueur-profil-label">Liquidités</span>
+                        <span id="pj-usd" class="joueur-profil-value">—</span>
+                    </div>
+                    <div class="joueur-profil-divider"></div>
+                    <div class="joueur-profil-stat">
+                        <span class="joueur-profil-label">PnL Total</span>
+                        <span id="pj-pnltotal" class="joueur-profil-value">—</span>
+                    </div>
+                </div>
+                <div class="section-separator">
+                    <span>Historique journalier</span>
+                </div>
+                <table class="market-table" id="portfolio-history-table" style="margin-bottom:20px;">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>PnL du jour</th>
+                            <th>Classement</th>
+                        </tr>
+                    </thead>
+                    <tbody id="portfolio-history-body"></tbody>
+                </table>
+                <div class="section-separator">
+                    <span>Positions ouvertes</span>
                 </div>
                 <table class="market-table">
                     <thead>
@@ -173,6 +177,9 @@
                             <th>Quantité</th>
                             <th>Prix actuel</th>
                             <th>Valeur</th>
+                            <th>Var. 24h</th>
+                            <th>PnL All Time</th>
+                            <th></th>
                         </tr>
                     </thead>
                     <tbody id="portfolio-body"></tbody>
@@ -210,6 +217,91 @@
             </section>
         </main>
     </div>
+    <!-- ── Panneau détail graphique (overlay global) ────────────────────────── -->
+    <div id="panneau-detail-bg" class="detail-overlay-bg" onclick="fermerDetailOverlay(event)">
+        <div id="panneau-detail" class="detail-overlay-panel">
+            <div class="detail-header">
+                <h2 id="detail-titre" style="margin: 0;">Symbole</h2>
+                <button class="btn-fermer" onclick="fermerDetail()">✖</button>
+            </div>
+            <div class="prix-gros" id="detail-prix">0.00 $</div>
+
+            <div class="stats-grid-detail">
+                <div class="stat-item">
+                    <span class="stat-label">Ouverture</span>
+                    <span class="stat-value" id="stat-open">—</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Fermeture</span>
+                    <span class="stat-value" id="stat-close">—</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Var. 24h</span>
+                    <span class="stat-value" id="stat-variation">—</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Plus haut 24h</span>
+                    <span class="stat-value" id="stat-high">—</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Plus bas 24h</span>
+                    <span class="stat-value" id="stat-low">—</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Volatilité 24h</span>
+                    <span class="stat-value" id="stat-volatilite">—</span>
+                </div>
+            </div>
+
+            <div class="timeframe-selector">
+                <button id="btn-1h" class="btn-time" onclick="changerFenetre('1h')">1 Heure</button>
+                <button id="btn-24h" class="btn-time active" onclick="changerFenetre('24h')">24 Heures</button>
+                <button id="btn-7d" class="btn-time" onclick="changerFenetre('7d')">7 Jours</button>
+            </div>
+            <div style="width: 100%; height: 250px; margin: 15px 0;">
+                <canvas id="graphique-actif"></canvas>
+            </div>
+            <div class="trade-box">
+                <button class="btn-achat" onclick="ouvrirModalTrade('achat')">Acheter</button>
+                <button class="btn-vente" onclick="ouvrirModalTrade('vente')">Vendre</button>
+            </div>
+            <p id="trade-message" style="margin-top:10px; font-weight:bold; font-size: 0.9em;"></p>
+        </div>
+    </div>
+
+    <!-- ── Modale achat / vente ─────────────────────────────────────────────── -->
+    <div id="modal-trade-bg" class="trade-modal-bg" onclick="fermerModalTrade(event)">
+        <div class="trade-modal">
+            <div class="trade-modal-header">
+                <span id="trade-modal-titre">Acheter</span> <span id="trade-modal-symbole" style="color:#555; font-size:0.85em; font-weight:normal; letter-spacing:0;"></span>
+                <button class="trade-modal-close" onclick="fermerModalTrade(null)">✕</button>
+            </div>
+            <div class="trade-modal-cours">
+                Cours actuel : <strong id="trade-modal-prix">—</strong>
+            </div>
+            <div class="trade-modal-field">
+                <label for="trade-modal-qte">Quantité (entier)</label>
+                <input type="number" id="trade-modal-qte" min="1" step="1" placeholder="0" oninput="majPreviewTrade()">
+            </div>
+            <div id="trade-modal-preview" class="trade-modal-preview">
+                <div class="trade-preview-row">
+                    <span>Coût brut</span>
+                    <strong id="prev-brut">—</strong>
+                </div>
+                <div class="trade-preview-row frais">
+                    <span>Frais (0.3%)</span>
+                    <strong id="prev-frais">—</strong>
+                </div>
+                <div class="trade-preview-row total">
+                    <span id="prev-total-label">Total à débiter</span>
+                    <strong id="prev-total">—</strong>
+                </div>
+            </div>
+            <button id="trade-modal-btn" class="trade-modal-confirm btn-achat" onclick="confirmerTrade()">Confirmer</button>
+            <p id="trade-modal-msg" style="margin-top:10px; font-weight:bold; font-size:0.9em; text-align:center;"></p>
+        </div>
+    </div>
+
     <script src="script.js"></script>
 </body>
 </html>

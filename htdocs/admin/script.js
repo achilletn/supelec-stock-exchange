@@ -64,6 +64,8 @@ function initAdmin() {
     setInterval(updateClock, 1000);
     loadAll();
     setInterval(loadAll, 15000);
+    const savedTab = localStorage.getItem('adminTab') || 'overview';
+    goTab(savedTab);
 }
 
 function loadAll() {
@@ -89,7 +91,9 @@ function goTab(name) {
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.getElementById('tab-' + name).classList.add('active');
-    event.currentTarget.classList.add('active');
+    const navItem = document.querySelector(`.nav-item[onclick*="'${name}'"]`);
+    if (navItem) navItem.classList.add('active');
+    localStorage.setItem('adminTab', name);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -429,9 +433,22 @@ async function openPortfolioModal(uid, username) {
     pendingPortfolioUserId = uid;
     document.getElementById('modal-portfolio-user').textContent = username;
     document.getElementById('modal-portfolio-list').innerHTML = '<tr><td colspan="3" class="dim" style="text-align:center;">Chargement...</td></tr>';
-    document.getElementById('modal-portfolio-new-sym').value = '';
     document.getElementById('modal-portfolio-new-qty').value = '';
-    
+
+    // Charger la liste des actifs disponibles dans le select
+    const sel = document.getElementById('modal-portfolio-new-sym');
+    sel.innerHTML = '<option value="">— Choisir un actif —</option>';
+    try {
+        const r = await fetch('/api/marche');
+        const actifs = await r.json();
+        actifs.forEach(a => {
+            const opt = document.createElement('option');
+            opt.value = a.symbol;
+            opt.textContent = a.symbol;
+            sel.appendChild(opt);
+        });
+    } catch (e) { /* si /api/marche échoue, le select reste vide */ }
+
     document.getElementById('modal-portfolio').classList.add('open');
     await fetchPortfolioList();
 }
@@ -452,7 +469,7 @@ async function fetchPortfolioList() {
             <tr>
               <td class="mono" style="color:var(--text);">${item.symbole}</td>
               <td>
-                <input id="asset-qty-${index}" type="number" step="0.000001" value="${item.quantite}" 
+                <input id="asset-qty-${index}" type="number" step="1" min="1" value="${Math.round(item.quantite)}"
                        style="width:100%; background:transparent; border:1px solid var(--border); color:var(--green); padding:4px; font-family:monospace;">
               </td>
               <td style="text-align: right; display: flex; gap: 6px; justify-content: flex-end;">
@@ -473,11 +490,11 @@ async function adminUpdateAsset(action, sym = null, inputId = null) {
     let finalQty = 0;
 
     if (action === 'new') {
-        finalSym = document.getElementById('modal-portfolio-new-sym').value.trim().toUpperCase();
-        finalQty = parseFloat(document.getElementById('modal-portfolio-new-qty').value);
+        finalSym = document.getElementById('modal-portfolio-new-sym').value.trim();
+        finalQty = parseInt(document.getElementById('modal-portfolio-new-qty').value, 10);
         if (!finalSym) { showToast('Symbole requis', true); return; }
     } else if (action === 'edit') {
-        finalQty = parseFloat(document.getElementById(inputId).value);
+        finalQty = parseInt(document.getElementById(inputId).value, 10);
     } else if (action === 'delete') {
         finalQty = 0; // Quantité 0 = suppression côté serveur
     }

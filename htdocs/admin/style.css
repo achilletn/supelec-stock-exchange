@@ -657,3 +657,8 @@ body::before {
     .sidebar { width: 160px; }
     .stats-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ── Cacher les flèches des inputs number ── */
+input[type=number]::-webkit-outer-spin-button,
+input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; appearance: textfield; }

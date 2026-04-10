@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <cstdlib>
 #include <chrono>
+#include <cmath>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
@@ -73,7 +74,15 @@ static void clearFailedAttempts(const std::string& ip) {
     bruteForceMap.erase(ip);
 }
 
-struct ActionItem { std::string nom; double prix; double variation_24h; };
+struct ActionItem {
+    std::string nom;
+    double prix        = 0.0;
+    double variation_24h = 0.0;
+    double open        = 0.0;
+    double high        = 0.0;
+    double low         = 0.0;
+    double close       = 0.0;   // == prix, alias lisible
+};
 std::map<std::string, ActionItem> marcheMondial;
 std::mutex marcheMutex;
 
@@ -289,11 +298,18 @@ void workerActualiserCours() {
                             double prix = std::stod(data["close"].get<std::string>());
                             if (prix <= 0.0) continue;
 
-                            marcheMondial[sym].prix = prix;
-                            marcheMondial[sym].nom  = data.value("name", sym);
+                            marcheMondial[sym].prix   = prix;
+                            marcheMondial[sym].close  = prix;
+                            marcheMondial[sym].nom    = data.value("name", sym);
 
                             if (data.contains("percent_change"))
                                 marcheMondial[sym].variation_24h = std::stod(data["percent_change"].get<std::string>());
+                            if (data.contains("open") && data["open"].is_string())
+                                marcheMondial[sym].open  = std::stod(data["open"].get<std::string>());
+                            if (data.contains("high") && data["high"].is_string())
+                                marcheMondial[sym].high  = std::stod(data["high"].get<std::string>());
+                            if (data.contains("low") && data["low"].is_string())
+                                marcheMondial[sym].low   = std::stod(data["low"].get<std::string>());
 
                             std::cout << "  [OK] " << sym << " = " << prix << " $" << std::endl;
                         } catch (...) {
@@ -382,14 +398,16 @@ int main() {
             type TEXT
         );
         CREATE TABLE IF NOT EXISTS portefeuilles (
-            user_id INTEGER, 
-            symbole TEXT, 
-            quantite REAL, 
-            FOREIGN KEY(user_id) REFERENCES utilisateurs(id), 
+            user_id INTEGER,
+            symbole TEXT,
+            quantite REAL,
+            prix_moyen REAL DEFAULT 0,
+            FOREIGN KEY(user_id) REFERENCES utilisateurs(id),
             UNIQUE(user_id, symbole)
         );
         CREATE TABLE IF NOT EXISTS historique (id INTEGER PRIMARY KEY AUTOINCREMENT, symbole TEXT, prix REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS snapshots (user_id INTEGER PRIMARY KEY, valeur REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES utilisateurs(id));
+        CREATE TABLE IF NOT EXISTS daily_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, date TEXT, pnl_day_pct REAL, rank INTEGER, FOREIGN KEY(user_id) REFERENCES utilisateurs(id), UNIQUE(user_id, date));
         CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, sujet TEXT, message TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS trades_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, action TEXT, symbole TEXT, quantite REAL, prix REAL, valeur REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES utilisateurs(id));
         CREATE TABLE IF NOT EXISTS sessions_log (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, ip TEXT, user_agent TEXT, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP);
@@ -409,6 +427,9 @@ int main() {
         INSERT OR IGNORE INTO config (key, value) VALUES ('game_running', '1');
     )";
     sqlite3_exec(db, initSql, nullptr, 0, nullptr);
+    // Migrations (ignore errors if columns/tables already exist)
+    sqlite3_exec(db, "ALTER TABLE portefeuilles ADD COLUMN prix_moyen REAL DEFAULT 0;", nullptr, 0, nullptr);
+    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS daily_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, date TEXT, pnl_day_pct REAL, rank INTEGER, FOREIGN KEY(user_id) REFERENCES utilisateurs(id), UNIQUE(user_id, date));", nullptr, 0, nullptr);
 
     // Charger l'état de la partie
     sqlite3_stmt* cfgStmt;
@@ -421,30 +442,105 @@ int main() {
         }
     }
     sqlite3_finalize(cfgStmt);
+
+    // Pré-charger les derniers prix connus depuis l'historique (résistance au rate-limit)
+    {
+        sqlite3_stmt* st;
+        const char* sqlPrix = R"(
+            SELECT h.symbole, h.prix
+            FROM historique h
+            INNER JOIN (SELECT symbole, MAX(id) AS max_id FROM historique GROUP BY symbole) latest
+            ON h.id = latest.max_id;
+        )";
+        if (sqlite3_prepare_v2(db, sqlPrix, -1, &st, nullptr) == SQLITE_OK) {
+            std::lock_guard<std::mutex> lock(marcheMutex);
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                std::string sym  = (const char*)sqlite3_column_text(st, 0);
+                double      prix = sqlite3_column_double(st, 1);
+                if (prix > 0.0) {
+                    marcheMondial[sym].prix  = prix;
+                    marcheMondial[sym].close = prix;
+                    marcheMondial[sym].nom   = sym;
+                    std::cout << "[INIT] " << sym << " = " << prix << " $ (historique)" << std::endl;
+                }
+            }
+            sqlite3_finalize(st);
+        }
+
+        // Initialiser lastMarketUpdateMs depuis le timestamp de la dernière entrée
+        sqlite3_stmt* stTs;
+        if (sqlite3_prepare_v2(db,
+            "SELECT CAST(strftime('%s', MAX(timestamp)) AS INTEGER) FROM historique;",
+            -1, &stTs, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stTs) == SQLITE_ROW && sqlite3_column_type(stTs, 0) != SQLITE_NULL) {
+                long long ts = sqlite3_column_int64(stTs, 0) * 1000LL;
+                lastMarketUpdateMs.store(ts);
+                std::cout << "[INIT] lastMarketUpdateMs = " << ts << " (depuis historique)" << std::endl;
+            }
+            sqlite3_finalize(stTs);
+        }
+    }
+
     sqlite3_close(db);
 
     std::thread(workerActualiserCours).detach();
 
-    // Routine : Snapshots 24h
+    // Routine : Snapshots 24h + enregistrement daily_history
     std::thread([]() {
         while (true) {
             std::this_thread::sleep_for(std::chrono::hours(24));
             sqlite3* db = openDatabase();
+
+            // 1. Calculer la valeur de chaque joueur et récupérer son snapshot actuel
+            struct UserDay { int uid; double valeur; double snap; };
+            std::vector<UserDay> users;
             sqlite3_stmt* su;
-            if (sqlite3_prepare_v2(db, "SELECT id FROM utilisateurs;", -1, &su, nullptr) == SQLITE_OK) {
+            if (sqlite3_prepare_v2(db, "SELECT u.id, COALESCE(s.valeur, 100000.0) FROM utilisateurs u LEFT JOIN snapshots s ON s.user_id = u.id;", -1, &su, nullptr) == SQLITE_OK) {
                 while (sqlite3_step(su) == SQLITE_ROW) {
                     int uid = sqlite3_column_int(su, 0);
+                    double snap = sqlite3_column_double(su, 1);
                     double val = calculerValeurPortefeuille(db, uid);
-                    sqlite3_stmt* stmtSnap;
-                    if (sqlite3_prepare_v2(db, "INSERT INTO snapshots (user_id, valeur) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET valeur = excluded.valeur, timestamp = CURRENT_TIMESTAMP;", -1, &stmtSnap, nullptr) == SQLITE_OK) {
-                        sqlite3_bind_int(stmtSnap, 1, uid);
-                        sqlite3_bind_double(stmtSnap, 2, val);
-                        sqlite3_step(stmtSnap);
-                    }
-                    sqlite3_finalize(stmtSnap);
+                    users.push_back({uid, val, snap});
                 }
             }
             sqlite3_finalize(su);
+
+            // 2. Trier par valeur décroissante pour le classement
+            std::sort(users.begin(), users.end(), [](const UserDay& a, const UserDay& b) { return a.valeur > b.valeur; });
+
+            // 3. Récupérer la date du jour (UTC)
+            time_t now = time(nullptr);
+            char dateStr[16];
+            strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", gmtime(&now));
+
+            // 4. Enregistrer le PnL du jour et le rang dans daily_history
+            for (int i = 0; i < (int)users.size(); i++) {
+                auto& u = users[i];
+                double pnl_day = u.snap > 0 ? (u.valeur - u.snap) / u.snap * 100.0 : 0.0;
+                int rank = i + 1;
+                sqlite3_stmt* stmtHist;
+                if (sqlite3_prepare_v2(db,
+                    "INSERT INTO daily_history (user_id, date, pnl_day_pct, rank) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(user_id, date) DO UPDATE SET pnl_day_pct = excluded.pnl_day_pct, rank = excluded.rank;",
+                    -1, &stmtHist, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_int(stmtHist, 1, u.uid);
+                    sqlite3_bind_text(stmtHist, 2, dateStr, -1, SQLITE_STATIC);
+                    sqlite3_bind_double(stmtHist, 3, pnl_day);
+                    sqlite3_bind_int(stmtHist, 4, rank);
+                    sqlite3_step(stmtHist);
+                }
+                sqlite3_finalize(stmtHist);
+
+                // 5. Mettre à jour le snapshot
+                sqlite3_stmt* stmtSnap;
+                if (sqlite3_prepare_v2(db, "INSERT INTO snapshots (user_id, valeur) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET valeur = excluded.valeur, timestamp = CURRENT_TIMESTAMP;", -1, &stmtSnap, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_int(stmtSnap, 1, u.uid);
+                    sqlite3_bind_double(stmtSnap, 2, u.valeur);
+                    sqlite3_step(stmtSnap);
+                }
+                sqlite3_finalize(stmtSnap);
+            }
+
             sqlite3_close(db);
         }
     }).detach();
@@ -493,7 +589,71 @@ int main() {
         json j = json::array();
         std::lock_guard<std::mutex> lock(marcheMutex);
         for (auto& [key, val] : marcheMondial)
-            j.push_back({ {"symbol", key}, {"price", val.prix}, {"variation_24h", val.variation_24h} });
+            j.push_back({
+                {"symbol",       key},
+                {"price",        val.prix},
+                {"variation_24h",val.variation_24h},
+                {"open",         val.open},
+                {"high",         val.high},
+                {"low",          val.low},
+                {"close",        val.close}
+            });
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // GET /api/stats?symbole=XXX — stats étendues + volatilité calculée depuis l'historique
+    svr.Get("/api/stats", [](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_param("symbole")) { res.status = 400; return; }
+        const std::string sym = req.get_param_value("symbole");
+
+        // 1. Données en mémoire
+        double open = 0, high = 0, low = 0, close = 0, variation = 0;
+        {
+            std::lock_guard<std::mutex> lock(marcheMutex);
+            if (marcheMondial.count(sym)) {
+                auto& v = marcheMondial[sym];
+                open = v.open; high = v.high; low = v.low;
+                close = v.close; variation = v.variation_24h;
+            }
+        }
+
+        // 2. Volatilité : écart-type des prix sur les 24 dernières heures
+        double volatilite = -1.0;
+        sqlite3* db = openDatabase();
+        if (db) {
+            sqlite3_stmt* st;
+            const char* sql = "SELECT prix FROM historique WHERE symbole = ? AND timestamp >= datetime('now', '-24 hours') ORDER BY timestamp ASC;";
+            if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(st, 1, sym.c_str(), -1, SQLITE_STATIC);
+                std::vector<double> prix;
+                while (sqlite3_step(st) == SQLITE_ROW)
+                    prix.push_back(sqlite3_column_double(st, 0));
+                sqlite3_finalize(st);
+                if (prix.size() >= 2) {
+                    double mean = 0;
+                    for (double p : prix) mean += p;
+                    mean /= prix.size();
+                    double variance = 0;
+                    for (double p : prix) variance += (p - mean) * (p - mean);
+                    volatilite = std::sqrt(variance / prix.size()) / mean * 100.0;
+                }
+            }
+            sqlite3_close(db);
+        }
+
+        auto fmt = [](double v) -> json {
+            return v != 0.0 ? json(v) : json(nullptr);
+        };
+
+        json j = {
+            {"symbol",     sym},
+            {"open",       fmt(open)},
+            {"high",       fmt(high)},
+            {"low",        fmt(low)},
+            {"close",      fmt(close)},
+            {"variation",  variation},
+            {"volatilite", volatilite >= 0 ? json(volatilite) : json(nullptr)}
+        };
         res.set_content(j.dump(), "application/json");
     });
 
@@ -855,10 +1015,17 @@ int main() {
             sqlite3_finalize(debitUsd);
 
             sqlite3_stmt* creditActif;
-            if (sqlite3_prepare_v2(db, "INSERT INTO portefeuilles (user_id, symbole, quantite) VALUES (?, ?, ?) ON CONFLICT(user_id, symbole) DO UPDATE SET quantite = quantite + excluded.quantite;", -1, &creditActif, nullptr) == SQLITE_OK) {
+            // Update prix_moyen: (old_qty * old_prix_moyen + new_qty * prix) / (old_qty + new_qty)
+            if (sqlite3_prepare_v2(db,
+                "INSERT INTO portefeuilles (user_id, symbole, quantite, prix_moyen) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id, symbole) DO UPDATE SET "
+                "prix_moyen = (quantite * COALESCE(prix_moyen,0) + excluded.quantite * excluded.prix_moyen) / (quantite + excluded.quantite), "
+                "quantite = quantite + excluded.quantite;",
+                -1, &creditActif, nullptr) == SQLITE_OK) {
                 sqlite3_bind_int(creditActif, 1, uid);
                 sqlite3_bind_text(creditActif, 2, symbole.c_str(), -1, SQLITE_STATIC);
                 sqlite3_bind_double(creditActif, 3, quantite);
+                sqlite3_bind_double(creditActif, 4, prix);
                 sqlite3_step(creditActif);
             }
             sqlite3_finalize(creditActif);
@@ -918,35 +1085,258 @@ int main() {
         int uid = getUserId(db, user);
         if (uid == -1) { sqlite3_close(db); res.status = 404; return; }
 
-        json j = json::array();
+        // Récupérer les données du portefeuille (hors USD)
+        json actifs = json::array();
+        double usd = 0.0;
         sqlite3_stmt* stmt;
-        if (sqlite3_prepare_v2(db, "SELECT symbole, quantite FROM portefeuilles WHERE user_id = ? AND quantite > 0;", -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_prepare_v2(db, "SELECT symbole, quantite, COALESCE(prix_moyen,0) FROM portefeuilles WHERE user_id = ? AND quantite > 0;", -1, &stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_int(stmt, 1, uid);
             while (sqlite3_step(stmt) == SQLITE_ROW) {
                 std::string sym = (const char*)sqlite3_column_text(stmt, 0);
                 double qte = sqlite3_column_double(stmt, 1);
-                double prix = 0.0;
-                double valeur = 0.0;
-                
+                double px_moyen = sqlite3_column_double(stmt, 2);
+
                 if (sym == "USD") {
-                    prix = 1.0;
-                    valeur = qte;
-                } else {
+                    usd = qte;
+                    continue;
+                }
+
+                double prix = 0.0, valeur = 0.0, var24h = 0.0;
+                {
                     std::lock_guard<std::mutex> lock(marcheMutex);
                     if (marcheMondial.count(sym)) {
                         prix = marcheMondial[sym].prix;
+                        var24h = marcheMondial[sym].variation_24h;
                         valeur = qte * prix;
                     }
                 }
-                j.push_back({ {"symbole", sym}, {"quantite", qte}, {"prix_unitaire", prix}, {"valeur", valeur} });
+
+                double pnl_alltime_pct = (px_moyen > 0) ? (prix - px_moyen) / px_moyen * 100.0 : 0.0;
+                double pnl_alltime_usd = (px_moyen > 0) ? (prix - px_moyen) * qte : 0.0;
+
+                char buf_var24h[32], buf_alltime[32], buf_alltime_usd[32];
+                snprintf(buf_var24h, sizeof(buf_var24h), "%+.2f%%", var24h);
+                snprintf(buf_alltime, sizeof(buf_alltime), "%+.2f%%", pnl_alltime_pct);
+                snprintf(buf_alltime_usd, sizeof(buf_alltime_usd), "%+.2f", pnl_alltime_usd);
+
+                actifs.push_back({
+                    {"symbole", sym}, {"quantite", qte}, {"prix_unitaire", prix}, {"valeur", valeur},
+                    {"variation_24h", std::string(buf_var24h)},
+                    {"pnl_alltime_pct", std::string(buf_alltime)},
+                    {"pnl_alltime_usd", std::string(buf_alltime_usd)}
+                });
             }
         }
         sqlite3_finalize(stmt);
+
+        // Calcul du PnL global
+        double valeurTotale = calculerValeurPortefeuille(db, uid);
+        double snap = 100000.0;
+        sqlite3_stmt* ss;
+        if (sqlite3_prepare_v2(db, "SELECT valeur FROM snapshots WHERE user_id = ?;", -1, &ss, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(ss, 1, uid);
+            if (sqlite3_step(ss) == SQLITE_ROW) snap = sqlite3_column_double(ss, 0);
+        }
+        sqlite3_finalize(ss);
+
+        double pnl24hPct = (valeurTotale - snap) / snap * 100.0;
+        double pnl24hUsd = valeurTotale - snap;
+        double pnlTotalPct = (valeurTotale - 100000.0) / 100000.0 * 100.0;
+        double pnlTotalUsd = valeurTotale - 100000.0;
+
+        char buf24p[32], buf24u[32], bufTp[32], bufTu[32];
+        snprintf(buf24p, sizeof(buf24p), "%+.2f%%", pnl24hPct);
+        snprintf(buf24u, sizeof(buf24u), "%+.2f", pnl24hUsd);
+        snprintf(bufTp, sizeof(bufTp), "%+.2f%%", pnlTotalPct);
+        snprintf(bufTu, sizeof(bufTu), "%+.2f", pnlTotalUsd);
+
+        json j = {
+            {"usd", usd},
+            {"pnl_24h_pct", std::string(buf24p)}, {"pnl_24h_usd", std::string(buf24u)},
+            {"pnl_total_pct", std::string(bufTp)}, {"pnl_total_usd", std::string(bufTu)},
+            {"actifs", actifs}
+        };
         sqlite3_close(db);
         res.set_content(j.dump(), "application/json");
     });
 
-    // POST /api/contact (Le frontend ayant été nettoyé, cette route n'est plus appelée, 
+    // GET /api/portefeuille/historique
+    svr.Get("/api/portefeuille/historique", [](const httplib::Request& req, httplib::Response& res) {
+        std::string user = getCookieUser(req);
+        if (user.empty()) { res.status = 401; return; }
+
+        sqlite3* db = openDatabase();
+        int uid = getUserId(db, user);
+        if (uid == -1) { sqlite3_close(db); res.status = 404; return; }
+
+        // Jour actuel : PnL 24h en cours
+        double valeurActuelle = calculerValeurPortefeuille(db, uid);
+        double snapActuel = 100000.0;
+        sqlite3_stmt* ss;
+        if (sqlite3_prepare_v2(db, "SELECT valeur FROM snapshots WHERE user_id = ?;", -1, &ss, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(ss, 1, uid);
+            if (sqlite3_step(ss) == SQLITE_ROW) snapActuel = sqlite3_column_double(ss, 0);
+        }
+        sqlite3_finalize(ss);
+
+        double pnlAujourdhui = snapActuel > 0 ? (valeurActuelle - snapActuel) / snapActuel * 100.0 : 0.0;
+
+        // Rang actuel
+        int rangActuel = 1;
+        sqlite3_stmt* sr;
+        if (sqlite3_prepare_v2(db, "SELECT id FROM utilisateurs;", -1, &sr, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(sr) == SQLITE_ROW) {
+                int other = sqlite3_column_int(sr, 0);
+                if (other != uid && calculerValeurPortefeuille(db, other) > valeurActuelle) rangActuel++;
+            }
+        }
+        sqlite3_finalize(sr);
+
+        time_t now = time(nullptr);
+        char todayStr[16];
+        strftime(todayStr, sizeof(todayStr), "%Y-%m-%d", gmtime(&now));
+
+        json hist = json::array();
+        char bufPnl[32];
+        snprintf(bufPnl, sizeof(bufPnl), "%+.2f%%", pnlAujourdhui);
+        hist.push_back({{"date", std::string(todayStr)}, {"pnl_day_pct", std::string(bufPnl)}, {"rank", rangActuel}, {"today", true}});
+
+        // Historique passé
+        sqlite3_stmt* sh;
+        if (sqlite3_prepare_v2(db, "SELECT date, pnl_day_pct, rank FROM daily_history WHERE user_id = ? ORDER BY date DESC;", -1, &sh, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(sh, 1, uid);
+            while (sqlite3_step(sh) == SQLITE_ROW) {
+                std::string date = (const char*)sqlite3_column_text(sh, 0);
+                double pnl = sqlite3_column_double(sh, 1);
+                int rank = sqlite3_column_int(sh, 2);
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%+.2f%%", pnl);
+                hist.push_back({{"date", date}, {"pnl_day_pct", std::string(buf)}, {"rank", rank}, {"today", false}});
+            }
+        }
+        sqlite3_finalize(sh);
+
+        sqlite3_close(db);
+        res.set_content(hist.dump(), "application/json");
+    });
+
+    // GET /api/portefeuille/joueur?username=X  (vue publique du portefeuille d'un joueur)
+    svr.Get("/api/portefeuille/joueur", [](const httplib::Request& req, httplib::Response& res) {
+        std::string viewer = getCookieUser(req);
+        if (viewer.empty()) { res.status = 401; return; }
+
+        std::string target = req.get_param_value("username");
+        if (target.empty()) { res.status = 400; return; }
+
+        sqlite3* db = openDatabase();
+        int uid = getUserId(db, target);
+        if (uid == -1) { sqlite3_close(db); res.status = 404; return; }
+
+        json actifs = json::array();
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db, "SELECT symbole, quantite, COALESCE(prix_moyen,0) FROM portefeuilles WHERE user_id = ? AND quantite > 0 AND symbole != 'USD';", -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(stmt, 1, uid);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                std::string sym = (const char*)sqlite3_column_text(stmt, 0);
+                double qte = sqlite3_column_double(stmt, 1);
+                double px_moyen = sqlite3_column_double(stmt, 2);
+                double prix = 0.0, valeur = 0.0, var24h = 0.0;
+                {
+                    std::lock_guard<std::mutex> lock(marcheMutex);
+                    if (marcheMondial.count(sym)) {
+                        prix = marcheMondial[sym].prix;
+                        var24h = marcheMondial[sym].variation_24h;
+                        valeur = qte * prix;
+                    }
+                }
+                double pnl_alltime_pct = (px_moyen > 0) ? (prix - px_moyen) / px_moyen * 100.0 : 0.0;
+                double pnl_alltime_usd = (px_moyen > 0) ? (prix - px_moyen) * qte : 0.0;
+                char buf_var24h[32], buf_alltime[32], buf_alltime_usd[32];
+                snprintf(buf_var24h, sizeof(buf_var24h), "%+.2f%%", var24h);
+                snprintf(buf_alltime, sizeof(buf_alltime), "%+.2f%%", pnl_alltime_pct);
+                snprintf(buf_alltime_usd, sizeof(buf_alltime_usd), "%+.2f", pnl_alltime_usd);
+                actifs.push_back({
+                    {"symbole", sym}, {"quantite", qte}, {"prix_unitaire", prix}, {"valeur", valeur},
+                    {"variation_24h", std::string(buf_var24h)},
+                    {"pnl_alltime_pct", std::string(buf_alltime)},
+                    {"pnl_alltime_usd", std::string(buf_alltime_usd)}
+                });
+            }
+        }
+        sqlite3_finalize(stmt);
+
+        // Liquidités
+        double usd = 0.0;
+        sqlite3_stmt* sUsd;
+        if (sqlite3_prepare_v2(db, "SELECT quantite FROM portefeuilles WHERE user_id = ? AND symbole = 'USD';", -1, &sUsd, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(sUsd, 1, uid);
+            if (sqlite3_step(sUsd) == SQLITE_ROW) usd = sqlite3_column_double(sUsd, 0);
+        }
+        sqlite3_finalize(sUsd);
+
+        // PnL total
+        double valeurTotale = calculerValeurPortefeuille(db, uid);
+        double pnlTotalPct = (valeurTotale - 100000.0) / 100000.0 * 100.0;
+        double pnlTotalUsd = valeurTotale - 100000.0;
+        char bufTp[32], bufTu[32];
+        snprintf(bufTp, sizeof(bufTp), "%+.2f%%", pnlTotalPct);
+        snprintf(bufTu, sizeof(bufTu), "%+.2f", pnlTotalUsd);
+
+        // Historique journalier
+        double snapActuel = 100000.0;
+        sqlite3_stmt* ss;
+        if (sqlite3_prepare_v2(db, "SELECT valeur FROM snapshots WHERE user_id = ?;", -1, &ss, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(ss, 1, uid);
+            if (sqlite3_step(ss) == SQLITE_ROW) snapActuel = sqlite3_column_double(ss, 0);
+        }
+        sqlite3_finalize(ss);
+
+        double pnlAujourdhui = snapActuel > 0 ? (valeurTotale - snapActuel) / snapActuel * 100.0 : 0.0;
+
+        // Rang actuel
+        int rangActuel = 1;
+        sqlite3_stmt* sr;
+        if (sqlite3_prepare_v2(db, "SELECT id FROM utilisateurs;", -1, &sr, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(sr) == SQLITE_ROW) {
+                int other = sqlite3_column_int(sr, 0);
+                if (other != uid && calculerValeurPortefeuille(db, other) > valeurTotale) rangActuel++;
+            }
+        }
+        sqlite3_finalize(sr);
+
+        time_t now = time(nullptr);
+        char todayStr[16];
+        strftime(todayStr, sizeof(todayStr), "%Y-%m-%d", gmtime(&now));
+
+        json hist = json::array();
+        char bufPnlJ[32];
+        snprintf(bufPnlJ, sizeof(bufPnlJ), "%+.2f%%", pnlAujourdhui);
+        hist.push_back({{"date", std::string(todayStr)}, {"pnl_day_pct", std::string(bufPnlJ)}, {"rank", rangActuel}, {"today", true}});
+
+        sqlite3_stmt* sh;
+        if (sqlite3_prepare_v2(db, "SELECT date, pnl_day_pct, rank FROM daily_history WHERE user_id = ? ORDER BY date DESC;", -1, &sh, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(sh, 1, uid);
+            while (sqlite3_step(sh) == SQLITE_ROW) {
+                std::string date = (const char*)sqlite3_column_text(sh, 0);
+                double pnl = sqlite3_column_double(sh, 1);
+                int rank = sqlite3_column_int(sh, 2);
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%+.2f%%", pnl);
+                hist.push_back({{"date", date}, {"pnl_day_pct", std::string(buf)}, {"rank", rank}, {"today", false}});
+            }
+        }
+        sqlite3_finalize(sh);
+
+        sqlite3_close(db);
+        res.set_content(json({
+            {"username", target}, {"actifs", actifs},
+            {"usd", usd},
+            {"pnl_total_pct", std::string(bufTp)}, {"pnl_total_usd", std::string(bufTu)},
+            {"historique", hist}
+        }).dump(), "application/json");
+    });
+
+    // POST /api/contact (Le frontend ayant été nettoyé, cette route n'est plus appelée,
     // mais je la laisse au propre au cas où tu remettes un formulaire).
     svr.Post("/api/contact", [](const httplib::Request& req, httplib::Response& res) {
         std::string user = getCookieUser(req);
