@@ -21,7 +21,7 @@ function sauvegarderUI() {
 
 function restaurerUI() {
     const raw = sessionStorage.getItem("uiState");
-    if (!raw) return;
+    if (!raw) { switchTab('marche'); return; }
     const state = JSON.parse(raw);
 
     // Profil d'un joueur : setter la cible AVANT switchTab
@@ -59,6 +59,9 @@ let symboleActuel = "";
 let periodeActuelle = "24h";
 let tickCount = 0;
 let prixActuel = 0;
+let graphiquePremierChargement = true;
+
+const PERIODE_ORDER = ['1h', '3h', '24h', '7d', '1m', '3m', '1y', '5y'];
 
 const tickHandlers = new Set();
 const syncClockHandles = {};
@@ -71,13 +74,14 @@ let masterTickTimeout = null;
 let masterTickStarted = false;
 let resyncInterval = null;
 
-const formateurDevise = new Intl.NumberFormat('fr-FR', {
-    style: 'currency',
-    currency: 'USD',
-    currencyDisplay: 'narrowSymbol', // Force le symbole court ($) au lieu de $US
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-});
+// Format uniforme : 1 234.56 (espace insécable comme séparateur milliers, point décimal)
+function formatNum(n, decimals = 2) {
+    return n.toLocaleString("en-US", {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals
+    }).replace(/,/g, '\u00A0');
+}
+function formatDevise(n) { return formatNum(n) + '\u00A0$'; }
 
 function fetchSyncStatus() {
     return fetch('/api/sync-status')
@@ -240,6 +244,9 @@ function demarrerJeu() {
 function switchTab(tabName) {
     localStorage.setItem("dernierTab", tabName);
     sauvegarderUI();
+    document.querySelectorAll(".game-nav [data-tab]").forEach(b => b.classList.remove("active"));
+    const activeBtn = document.querySelector(`.game-nav [data-tab="${tabName}"]`);
+    if (activeBtn) activeBtn.classList.add("active");
     document.querySelectorAll(".tab-content").forEach(t => (t.style.display = "none"));
     
     const target = document.getElementById(`tab-${tabName}`);
@@ -270,6 +277,10 @@ function arreterBoucleMarche() {
     cancelSyncClock("sync-clock");
 }
 
+let donneesMarche = [];
+let filtreMarche  = "";
+let triMarche     = { col: null, dir: 1 };
+
 function actualiserTableauMarche() {
     const tbody = document.getElementById("market-body");
     if (!tbody) return;
@@ -278,44 +289,100 @@ function actualiserTableauMarche() {
         .then(res => res.json())
         .then(data => {
             if (data.length === 0) {
-            // ...
                 tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#f39c12;">Synchronisation en cours... 📡</td></tr>`;
                 return;
             }
-            tbody.innerHTML = "";
-            data.forEach(action => {
-                const tr = document.createElement("tr");
-                const variColor = action.variation_24h >= 0 ? "#2ecc71" : "#e74c3c";
-                const variSign = action.variation_24h >= 0 ? "+" : "";
-                tr.innerHTML = `
-                    <td><a href="#" class="lien-actif" onclick="voirDetail('${action.symbol}');return false;"><strong>${action.symbol}</strong></a></td>
-                    <td class="price">${action.price.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $</td>
-                    <td style="font-family:'Courier New',monospace; font-weight:bold; color:${variColor};">
-                        ${variSign}${action.variation_24h.toFixed(2)}%
-                    </td>
-                    <td style="display:flex; gap:6px; justify-content:center;">
-                        <button class="btn-achat" style="padding:4px 10px; font-size:0.85em;" onclick="achatDepuisMarche('${action.symbol}', ${action.price})">Acheter</button>
-                        <button class="btn-vente" style="padding:4px 10px; font-size:0.85em;" onclick="venteDepuisMarche('${action.symbol}', ${action.price})">Vendre</button>
-                        <button class="btn-detail" onclick="voirDetail('${action.symbol}')">Détails</button>
-                    </td>`;
-                tbody.appendChild(tr);
+            donneesMarche = data;
 
-                if (action.symbol === symboleActuel) {
-                    prixActuel = action.price;
-                    const elPrix = document.getElementById("detail-prix");
-                    if (elPrix) {
-                        elPrix.innerText = action.price.toLocaleString("fr-FR", {
-                            minimumFractionDigits: 2,
-                            maximumFractionDigits: 2
-                        }) + " $";
-                    }
-                    majPreviewTrade();
-                }
-            });
+            // Mise à jour silencieuse du prix dans le panneau détail/trade ouvert
+            const actuelData = data.find(a => a.symbol === symboleActuel);
+            if (actuelData) {
+                prixActuel = actuelData.price;
+                const elPrix = document.getElementById("detail-prix");
+                if (elPrix) elPrix.innerText = formatDevise(actuelData.price);
+                majPreviewTrade();
+            }
+
+            afficherTableauMarche();
         })
         .catch(() => {
             tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:red;">Erreur réseau ❌</td></tr>`;
         });
+}
+
+function afficherTableauMarche() {
+    const tbody = document.getElementById("market-body");
+    if (!tbody || donneesMarche.length === 0) return;
+
+    // Filtrage
+    let données = donneesMarche;
+    if (filtreMarche) {
+        données = données.filter(a => a.symbol.toUpperCase().includes(filtreMarche));
+    }
+
+    // Tri
+    if (triMarche.col) {
+        données = [...données].sort((a, b) => {
+            const va = a[triMarche.col];
+            const vb = b[triMarche.col];
+            if (typeof va === "string") return triMarche.dir * va.localeCompare(vb);
+            return triMarche.dir * (va - vb);
+        });
+    }
+
+    // Compteur
+    const countEl = document.getElementById("market-count");
+    if (countEl) {
+        countEl.textContent = filtreMarche
+            ? `${données.length} / ${donneesMarche.length} actif${donneesMarche.length > 1 ? "s" : ""}`
+            : `${donneesMarche.length} actif${donneesMarche.length > 1 ? "s" : ""}`;
+    }
+
+    // Indicateurs visuels de tri sur les <th>
+    ["symbol", "price", "variation_24h"].forEach(col => {
+        const thId = col === "symbol" ? "th-symbol" : col === "price" ? "th-price" : "th-variation";
+        const th = document.getElementById(thId);
+        if (!th) return;
+        th.classList.remove("asc", "desc");
+        if (triMarche.col === col) th.classList.add(triMarche.dir === 1 ? "asc" : "desc");
+    });
+
+    // Rendu des lignes
+    tbody.innerHTML = "";
+    if (données.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#888;">Aucun actif trouvé pour « ${filtreMarche} »</td></tr>`;
+        return;
+    }
+    données.forEach(action => {
+        const tr = document.createElement("tr");
+        tr.classList.add("row-cliquable");
+        tr.addEventListener("click", e => {
+            if (!e.target.closest("button")) voirDetail(action.symbol);
+        });
+        const variColor = action.variation_24h >= 0 ? "#2ecc71" : "#e74c3c";
+        const variSign  = action.variation_24h >= 0 ? "+" : "";
+        tr.innerHTML = `
+            <td><span class="lien-actif"><strong>${action.symbol}</strong></span></td>
+            <td class="price">${formatDevise(action.price)}</td>
+            <td style="font-family:'JetBrains Mono','Courier New',monospace; font-weight:bold; color:${variColor};">
+                ${variSign}${action.variation_24h.toFixed(2)}%
+            </td>
+            <td style="display:flex; gap:6px; justify-content:center;">
+                <button class="btn-achat" style="padding:4px 10px; font-size:0.85em;" onclick="achatDepuisMarche('${action.symbol}', ${action.price})">Acheter</button>
+                <button class="btn-vente" style="padding:4px 10px; font-size:0.85em;" onclick="venteDepuisMarche('${action.symbol}', ${action.price})">Vendre</button>
+            </td>`;
+        tbody.appendChild(tr);
+    });
+}
+
+function trierColonneMarche(col) {
+    if (triMarche.col === col) {
+        triMarche.dir = -triMarche.dir; // inverser direction
+    } else {
+        triMarche.col = col;
+        triMarche.dir = 1;
+    }
+    afficherTableauMarche();
 }
 
 function demarrerBoucleClassement() {
@@ -357,12 +424,12 @@ function chargerClassement() {
                 tr.innerHTML = `
                     <td>${medaille}</td>
                     <td><strong><a href="#" class="lien-joueur" onclick="voirPortefeuilleJoueur('${joueur.username}');return false;">${joueur.username}</a></strong></td>
-                    <td style="font-weight:bold;">${joueur.valeur_totale.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $</td>
+                    <td style="font-weight:bold;">${formatDevise(joueur.valeur_totale)}</td>
                     <td style="color:${color24h};font-weight:bold;">
-                        ${joueur.pnl_24h_usd ?? "—"} $<br><span style="font-size:0.85em;">${joueur.pnl_24h_pct ?? "—"}</span>
+                        ${joueur.pnl_24h_usd ?? "—"}\u00A0$<br><span style="font-size:0.85em;">${joueur.pnl_24h_pct ?? "—"}</span>
                     </td>
                     <td style="color:${colorTotal};font-weight:bold;">
-                        ${joueur.pnl_total_usd ?? "—"} $<br><span style="font-size:0.85em;">${joueur.pnl}</span>
+                        ${joueur.pnl_total_usd ?? "—"}\u00A0$<br><span style="font-size:0.85em;">${joueur.pnl}</span>
                     </td>`;
                 tbody.appendChild(tr);
             });
@@ -371,15 +438,15 @@ function chargerClassement() {
 
 function appliquerDonneesDashboard(data) {
     document.getElementById("dash-username").innerText = data.username.toUpperCase();
-    document.getElementById("dash-wallet").innerText = formateurDevise.format(data.valeur_totale);
+    document.getElementById("dash-wallet").innerText = formatDevise(data.valeur_totale);
 
     const pnlEl = document.getElementById("dash-pnl");
-    pnlEl.innerText = `${data.pnl} (${data.pnl_total_usd ?? "—"} $)`;
+    pnlEl.innerText = data.pnl;
     pnlEl.style.color = data.pnl.startsWith("+") && data.pnl !== "+0.00%" ? "#2ecc71" : data.pnl.startsWith("-") ? "#e74c3c" : "#888";
 
     const usdEl = document.getElementById("dash-usd");
     if (usdEl && data.usd !== undefined) {
-        usdEl.innerText = formateurDevise.format(data.usd);
+        usdEl.innerText = formatDevise(data.usd);
     }
 }
 
@@ -436,11 +503,11 @@ function afficherActifs(actifs) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
             <td><a href="#" class="lien-actif" onclick="voirDetail('${ligne.symbole}');return false;"><strong>${ligne.symbole}</strong></a></td>
-            <td style="font-family:'Courier New',monospace;">${ligne.quantite.toLocaleString("en-US", { maximumFractionDigits: 6 })}</td>
-            <td style="font-family:'Courier New',monospace;">${ligne.prix_unitaire > 0 ? ligne.prix_unitaire.toLocaleString("en-US", { minimumFractionDigits: 2 }) + " $" : "—"}</td>
-            <td style="font-family:'Courier New',monospace; font-weight:bold;">${formateurDevise.format(ligne.valeur)}</td>
+            <td style="font-family:'Courier New',monospace;">${formatNum(ligne.quantite, 6)}</td>
+            <td style="font-family:'Courier New',monospace;">${ligne.prix_unitaire > 0 ? formatDevise(ligne.prix_unitaire) : "—"}</td>
+            <td style="font-family:'Courier New',monospace; font-weight:bold;">${formatDevise(ligne.valeur)}</td>
             <td style="font-family:'Courier New',monospace; color:${color24h};">${ligne.variation_24h ?? "—"}</td>
-            <td style="font-family:'Courier New',monospace; color:${colorAlltime};">${ligne.pnl_alltime_pct ?? "—"}<br><span style="font-size:0.85em;">${ligne.pnl_alltime_usd ?? "—"} $</span></td>
+            <td style="font-family:'Courier New',monospace; color:${colorAlltime};">${ligne.pnl_alltime_pct ?? "—"}<br><span style="font-size:0.85em;">${ligne.pnl_alltime_usd ?? "—"}\u00A0$</span></td>
             ${!portfolioJoueurCible ? `<td><button class="btn-vente" style="padding:4px 12px; font-size:0.85em;" onclick="vendreDepuisPortefeuille('${ligne.symbole}', ${ligne.prix_unitaire})">Vendre</button></td>` : '<td></td>'}`;
         tbody.appendChild(tr);
     });
@@ -453,12 +520,15 @@ function chargerPortefeuille() {
 
     const joueurSummary = document.getElementById("portfolio-joueur-summary");
 
+    const sectionTrades = document.getElementById("section-trades-perso");
+
     if (portfolioJoueurCible) {
         // Vue d'un autre joueur
         if (titre) titre.innerText = `Portefeuille de ${portfolioJoueurCible}`;
         if (btnRetour) btnRetour.style.display = "inline-block";
         if (joueurSummary) joueurSummary.style.display = "flex";
         if (histTable) histTable.style.display = "";
+        if (sectionTrades) sectionTrades.style.display = "none";
 
         fetch(`/api/portefeuille/joueur?username=${encodeURIComponent(portfolioJoueurCible)}`)
             .then(res => res.json())
@@ -466,10 +536,10 @@ function chargerPortefeuille() {
                 // Résumé
                 const pjUsd = document.getElementById("pj-usd");
                 const pjPnl = document.getElementById("pj-pnltotal");
-                if (pjUsd) pjUsd.innerText = formateurDevise.format(data.usd);
+                if (pjUsd) pjUsd.innerText = formatDevise(data.usd);
                 if (pjPnl && data.pnl_total_pct) {
                     const isPos = data.pnl_total_pct.startsWith("+") && data.pnl_total_pct !== "+0.00%";
-                    pjPnl.innerText = `${data.pnl_total_pct}  (${data.pnl_total_usd} $)`;
+                    pjPnl.innerText = `${data.pnl_total_pct}  (${data.pnl_total_usd}\u00A0$)`;
                     pjPnl.style.color = isPos ? "#2ecc71" : data.pnl_total_pct.startsWith("-") ? "#e74c3c" : "#888";
                 }
                 // Historique
@@ -485,6 +555,7 @@ function chargerPortefeuille() {
     if (btnRetour) btnRetour.style.display = "none";
     if (joueurSummary) joueurSummary.style.display = "none";
     if (histTable) histTable.style.display = "";
+    if (sectionTrades) sectionTrades.style.display = "";
 
     // Actifs
     fetch("/api/portefeuille")
@@ -495,6 +566,9 @@ function chargerPortefeuille() {
     fetch("/api/portefeuille/historique")
         .then(res => res.json())
         .then(rows => afficherHistorique(rows));
+
+    // Historique des trades
+    chargerHistoriquesTrades();
 }
 
 function afficherHistorique(rows) {
@@ -513,11 +587,53 @@ function afficherHistorique(rows) {
     });
 }
 
+function chargerHistoriquesTrades() {
+    const tbody = document.getElementById("trades-history-body");
+    if (!tbody) return;
+
+    fetch("/api/trades/historique")
+        .then(res => res.json())
+        .then(trades => {
+            tbody.innerHTML = "";
+            if (trades.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:16px;color:#888;">Aucun trade effectué pour l'instant.</td></tr>`;
+                return;
+            }
+            trades.forEach(t => {
+                const isAchat = t.action === "achat";
+                const couleurAction = isAchat ? "#2ecc71" : "#e74c3c";
+                const labelAction = isAchat ? "Achat" : "Vente";
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td style="color:#888;font-size:0.9em;">${t.timestamp}</td>
+                    <td><strong style="color:${couleurAction}">${labelAction}</strong></td>
+                    <td><a href="#" class="lien-actif" onclick="voirDetail('${t.symbole}');return false;"><strong>${t.symbole}</strong></a></td>
+                    <td style="font-family:'JetBrains Mono','Courier New',monospace;">${formatNum(t.quantite, 6)}</td>
+                    <td style="font-family:'JetBrains Mono','Courier New',monospace;">${formatDevise(t.prix)}</td>
+                    <td style="font-family:'JetBrains Mono','Courier New',monospace;font-weight:bold;">${formatDevise(t.valeur)}</td>`;
+                tbody.appendChild(tr);
+            });
+        })
+        .catch(() => {
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:red;">Erreur de chargement.</td></tr>`;
+        });
+}
+
 function startSyncClock(canvasId) {
     cancelSyncClock(canvasId);
     const canvas = document.getElementById(canvasId);
     if (!canvas) return;
+
+    // HiDPI : résolution interne × devicePixelRatio
+    const dpr = window.devicePixelRatio || 1;
+    const size = 28;
+    canvas.width  = size * dpr;
+    canvas.height = size * dpr;
+    canvas.style.width  = size + "px";
+    canvas.style.height = size + "px";
+
     const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
     let resetting = false;
 
     const localStart = Date.now();
@@ -526,7 +642,7 @@ function startSyncClock(canvasId) {
             ? (Date.now() - serverLastUpdateMs) % CYCLE_MS
             : (Date.now() - localStart) % CYCLE_MS;   // fallback local si pas encore sync
         const progress = elapsed / CYCLE_MS;
-        ctx.clearRect(0, 0, 28, 28);
+        ctx.clearRect(0, 0, size, size);
 
         const cx = 14, cy = 14, r = 10;
         const startAngle = -Math.PI / 2;
@@ -576,6 +692,7 @@ function cancelSyncClock(canvasId) {
 
 function voirDetail(symbol) {
     symboleActuel = symbol;
+    graphiquePremierChargement = true;
     document.getElementById("detail-titre").innerText = symbol;
     document.getElementById("trade-message").innerText = "";
     document.getElementById("modal-trade-bg").classList.remove("open");
@@ -586,7 +703,7 @@ function voirDetail(symbol) {
 }
 
 function chargerStats(symbol) {
-    const fmt = (v, decimals = 2) => v != null ? v.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }) + " $" : "—";
+    const fmt = (v) => v != null ? formatDevise(v) : "—";
     const fmtPct = (v, decimals = 2) => v != null ? (v >= 0 ? "+" : "") + v.toFixed(decimals) + "%" : "—";
 
     // Réinitialiser
@@ -630,51 +747,77 @@ function fermerDetailOverlay(event) {
 }
 
 function changerFenetre(periode) {
+    const prev = periodeActuelle;
     periodeActuelle = periode;
     document.querySelectorAll(".btn-time").forEach(b => b.classList.remove("active"));
     document.getElementById(`btn-${periode}`).classList.add("active");
-    chargerGraphique(symboleActuel, periodeActuelle);
+    chargerGraphique(symboleActuel, periode, prev);
 }
 
 function getCacheKey(symbol, periode) { return `${symbol}_${periode}`; }
 
-function chargerGraphique(symbol, periode) {
+function chargerGraphique(symbol, periode, prevPeriode) {
     const key = getCacheKey(symbol, periode);
-    const cache = cacheGraphique[key];
-    const url = cache
-        ? `/api/historique?symbole=${symbol}&periode=${periode}&depuis=${encodeURIComponent(cache.lastTimestamp)}`
-        : `/api/historique?symbole=${symbol}&periode=${periode}`;
+    const wrapper = document.getElementById("graphique-wrapper");
+    const isTransition = !!prevPeriode && prevPeriode !== periode;
+    const zoomIn = isTransition &&
+        PERIODE_ORDER.indexOf(periode) < PERIODE_ORDER.indexOf(prevPeriode);
 
-    fetch(url)
-        .then(res => res.json())
-        .then(data => {
-            if (!cache) {
+    const fetchEtRendre = () => {
+        fetch(`/api/historique?symbole=${symbol}&periode=${periode}`)
+            .then(res => res.json())
+            .then(data => {
                 cacheGraphique[key] = {
                     labels: data.map(d => d.time),
-                    prices: data.map(d => d.price),
-                    lastTimestamp: data.length ? data[data.length - 1].timestamp : ""
+                    prices: data.map(d => d.price)
                 };
-            } else if (data.length > 0) {
-                cache.labels.push(...data.map(d => d.time));
-                cache.prices.push(...data.map(d => d.price));
-                cache.lastTimestamp = data[data.length - 1].timestamp;
-            }
+                const c = cacheGraphique[key];
+                if (!c.prices.length) return;
 
-            const c = cacheGraphique[key];
-            if (!c.prices.length) return;
+                const dernierPrix = c.prices[c.prices.length - 1];
+                document.getElementById("detail-prix").innerText = formatDevise(dernierPrix);
+                prixActuel = dernierPrix;
 
-            const dernierPrix = c.prices[c.prices.length - 1];
-            document.getElementById("detail-prix").innerText = dernierPrix.toLocaleString("fr-FR", {minimumFractionDigits: 2}) + " $";
-            prixActuel = dernierPrix;
-            dessinerGraphique(c.labels, c.prices);
-            majPreviewTrade();
-        })
-        .catch(err => console.error("Erreur graphique:", err));
+                const avecAnimationChart = graphiquePremierChargement && !isTransition;
+                graphiquePremierChargement = false;
+                dessinerGraphique(c.labels, c.prices, avecAnimationChart);
+                majPreviewTrade();
+
+                if (isTransition && wrapper) {
+                    const fromX = zoomIn ? "16px" : "-16px";
+                    wrapper.style.transition = "none";
+                    wrapper.style.transform = `translateX(${fromX}) scaleX(0.96)`;
+                    wrapper.style.opacity = "0";
+                    requestAnimationFrame(() => requestAnimationFrame(() => {
+                        wrapper.style.transition =
+                            "transform 0.28s cubic-bezier(0.25,0.46,0.45,0.94), opacity 0.28s ease-out";
+                        wrapper.style.transform = "none";
+                        wrapper.style.opacity = "1";
+                    }));
+                }
+            })
+            .catch(err => console.error("Erreur graphique:", err));
+    };
+
+    if (isTransition && wrapper) {
+        const toX = zoomIn ? "-16px" : "16px";
+        wrapper.style.transition = "transform 0.15s ease-in, opacity 0.15s ease-in";
+        wrapper.style.transform = `translateX(${toX}) scaleX(0.96)`;
+        wrapper.style.opacity = "0";
+        setTimeout(fetchEtRendre, 150);
+    } else {
+        fetchEtRendre();
+    }
 }
 
-function dessinerGraphique(labels, prices) {
+function dessinerGraphique(labels, prices, animate = false) {
     const ctx = document.getElementById("graphique-actif").getContext("2d");
     if (graphiqueActif) graphiqueActif.destroy();
+
+    const isDark = document.body.classList.contains("dark");
+    const curveColor = isDark ? "#6aa3ff" : "#1877f2";
+    const fillColor  = isDark ? "rgba(106,163,255,0.15)" : "rgba(24,119,242,0.1)";
+    const gridColor  = isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)";
 
     graphiqueActif = new Chart(ctx, {
         type: "line",
@@ -683,9 +826,9 @@ function dessinerGraphique(labels, prices) {
             datasets: [{
                 label: "Prix",
                 data: prices,
-                borderColor: "#1877f2",
-                backgroundColor: "rgba(24,119,242,0.1)",
-                borderWidth: 2,
+                borderColor: curveColor,
+                backgroundColor: fillColor,
+                borderWidth: isDark ? 2.5 : 2,
                 pointRadius: 0,
                 pointHoverRadius: 6,
                 fill: true,
@@ -693,13 +836,16 @@ function dessinerGraphique(labels, prices) {
             }]
         },
         options: {
+            animation: animate
+                ? { duration: 700, easing: "easeInOutQuart" }
+                : false,
             responsive: true,
             maintainAspectRatio: false,
             interaction: { mode: "index", intersect: false },
             plugins: { legend: { display: false } },
             scales: {
                 x: { grid: { display: false } },
-                y: { grace: "5%", grid: { color: "#f0f0f0" } }
+                y: { grace: "5%", grid: { color: gridColor, lineWidth: 0.5 } }
             }
         }
     });
@@ -739,8 +885,7 @@ function ouvrirModalTrade(action) {
     btn.className = "trade-modal-confirm " + (action === "achat" ? "btn-achat" : "btn-vente");
     btn.innerText = action === "achat" ? "Confirmer l'achat" : "Confirmer la vente";
 
-    const fmt = (n) => n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    prixEl.innerText = prixActuel > 0 ? fmt(prixActuel) + " $" : "—";
+    prixEl.innerText = prixActuel > 0 ? formatDevise(prixActuel) : "—";
 
     document.getElementById("prev-total-label").innerText = action === "achat" ? "Total à débiter" : "Net à recevoir";
 
@@ -764,7 +909,6 @@ function fermerModalTrade(event) {
 
 function majPreviewTrade() {
     const qte = parseInt(document.getElementById("trade-modal-qte").value, 10);
-    const fmt = (n) => n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
     if (!qte || qte <= 0 || prixActuel <= 0) {
         document.getElementById("prev-brut").innerText = "—";
@@ -777,9 +921,9 @@ function majPreviewTrade() {
     const frais = brut * 0.003;
     const total = tradeActionCourante === "achat" ? brut + frais : brut - frais;
 
-    document.getElementById("prev-brut").innerText = fmt(brut) + " $";
-    document.getElementById("prev-frais").innerText = fmt(frais) + " $";
-    document.getElementById("prev-total").innerText = (tradeActionCourante === "achat" ? "-" : "+") + fmt(total) + " $";
+    document.getElementById("prev-brut").innerText = formatDevise(brut);
+    document.getElementById("prev-frais").innerText = formatDevise(frais);
+    document.getElementById("prev-total").innerText = (tradeActionCourante === "achat" ? "-" : "+") + formatDevise(total);
 }
 
 function confirmerTrade() {

@@ -112,6 +112,8 @@ body {
     align-items: center;
     min-height: 100vh;
     margin: 0;
+    padding: 15vh 0 60px;
+    box-sizing: border-box;
     transition: background-color 0.3s, color 0.3s;
 }
 
@@ -240,7 +242,7 @@ body.dark .dark-toggle-thumb { left: 19px; }
     text-decoration: none;
     cursor: pointer;
     border-radius: 4px;
-    padding: 1px 5px 1px 4px;
+    padding: 1px 8px 1px 7px;
     transition: background 0.15s, color 0.15s;
     display: inline-block;
 }
@@ -271,7 +273,7 @@ body.dark .dark-toggle-thumb { left: 19px; }
 /* ── Séparateur de sections ──────────────────────────────────────────────── */
 .section-separator {
     display: flex; align-items: center; gap: 12px;
-    margin: 24px 0 14px; color: var(--section-sep-color);
+    margin: 48px 0 16px; color: var(--section-sep-color);
     font-size: 0.78em; text-transform: uppercase; letter-spacing: 1.5px;
 }
 .section-separator::before, .section-separator::after { content: ''; flex: 1; height: 1px; background: var(--separator-line); }
@@ -282,13 +284,78 @@ body.dark .dark-toggle-thumb { left: 19px; }
 
 /* ── Navigation ───────────────────────────────────────────────────────────── */
 .game-nav { display: flex; gap: 10px; margin-bottom: 20px; align-items: center; }
-.game-nav-right { margin-left: auto; display: flex; align-items: center; }
+.game-nav-right { display: flex; align-items: center; }
+
+/* Style E — 4 boutons principaux */
+.game-nav button:not(.btn-deconnexion) {
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    border-radius: 4px;
+    padding: 9px 14px;
+    font-weight: 700;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    box-shadow: none;
+    transition: background 0.15s, color 0.15s;
+}
+.game-nav button:not(.btn-deconnexion):hover {
+    background: rgba(127,127,127,0.1);
+    color: var(--text);
+}
+.game-nav button:not(.btn-deconnexion).active {
+    background: rgba(79,142,247,0.13);
+    color: var(--accent);
+}
+
+/* Style D rouge — bouton Se déconnecter */
+.btn-deconnexion {
+    margin-left: auto;
+    background: transparent;
+    color: var(--red);
+    border: 1px solid var(--red);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+    font-size: 0.88em;
+    transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+}
+.btn-deconnexion:hover {
+    background: rgba(231,76,60,0.15);
+    color: var(--red);
+    box-shadow: 0 0 8px rgba(231,76,60,0.2);
+}
+
+/* ── Barre de recherche marché ───────────────────────────────────────────── */
+.market-toolbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+.market-search {
+    flex: 1; max-width: 280px;
+    padding: 8px 14px; font-size: 0.88em;
+    border: 1px solid var(--border2); border-radius: 5px;
+    background: var(--bg-input); color: var(--text);
+    transition: border-color 0.2s;
+}
+.market-search:focus { outline: none; border-color: var(--accent); }
+.market-count { font-size: 0.82em; color: var(--text-muted); }
 
 /* ── Tableau marché ───────────────────────────────────────────────────────── */
-.market-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+.market-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
 .market-table th, .market-table td { padding: 12px; border-bottom: 1px solid var(--border); text-align: left; }
+.market-table th.sortable {
+    cursor: pointer; user-select: none;
+    transition: color 0.15s;
+}
+.market-table th.sortable:hover { color: var(--text-dim); }
+.market-table th.sortable::after { content: ' ⇅'; color: var(--border3); font-size: 0.8em; }
+.market-table th.sortable.asc::after  { content: ' ▲'; color: var(--accent); font-size: 0.75em; }
+.market-table th.sortable.desc::after { content: ' ▼'; color: var(--accent); font-size: 0.75em; }
 .price { font-family: 'Courier New', monospace; font-weight: bold; color: var(--green); }
-.btn-detail { background-color: var(--orange); font-size: 0.8em; }
+.row-cliquable { cursor: pointer; }
+.row-cliquable:hover { background: var(--bg-card2); }
 
 /* ── Layout trading ──────────────────────────────────────────────────────── */
 .trading-layout { display: flex; gap: 20px; align-items: flex-start; }
@@ -355,13 +422,24 @@ body.dark .dark-toggle-thumb { left: 19px; }
 
 .prix-gros { font-size: 2.5em; font-family: 'Courier New', monospace; font-weight: bold; color: var(--green); margin: 10px 0; }
 
-.timeframe-selector { display: flex; justify-content: center; gap: 5px; margin-bottom: 10px; }
+#graphique-wrapper { overflow: hidden; }
+
+.timeframe-selector { display: flex; justify-content: center; gap: 8px; margin-bottom: 10px; }
 .btn-time {
-    background-color: var(--btn-time-bg); color: var(--btn-time-color);
-    border: 1px solid var(--btn-time-border); border-radius: 4px;
-    padding: 5px 15px; font-size: 0.9em; cursor: pointer;
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 8px 14px;
+    font-size: 0.88em;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: none;
+    transition: color 0.2s, border-color 0.2s;
 }
-.btn-time.active { background-color: var(--accent); color: white; border-color: var(--accent); }
+.btn-time:hover { background: transparent; color: var(--text); }
+.btn-time.active { color: var(--accent); border-bottom-color: var(--accent); }
 
 .trade-box { display: flex; gap: 10px; justify-content: center; }
 .btn-achat { background-color: var(--green); }
@@ -454,3 +532,268 @@ body.dark .dark-toggle-thumb { left: 19px; }
     border-bottom: 1px solid var(--propos-card-border); padding-bottom: 10px;
 }
 .propos-card ul { padding-left: 20px; }
+
+/* ── Scroll horizontal des tables ────────────────────────────────────────── */
+.table-scroll {
+    overflow-x: hidden;
+    margin-bottom: 8px;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   RESPONSIVE — TABLETTE / PETIT ÉCRAN  (≤ 800px)
+   ══════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 800px) {
+    .dash-label { font-size: 0.62em; letter-spacing: 0.8px; }
+    .dash-value { font-size: 0.9em; }
+    .user-dashboard-header { padding: 10px 14px; }
+}
+
+@media (max-width: 700px) {
+    .dash-label { font-size: 0.68em; letter-spacing: 0.9px; }
+    .dash-value { font-size: 1em; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   RESPONSIVE — MOBILE  (≤ 700px)
+   ══════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 700px) {
+
+    /* ── Body : aligner en haut, bloquer scroll horizontal ─────────────── */
+    html {
+        overflow-x: hidden;
+        max-width: 100%;
+    }
+    body {
+        overflow-x: hidden;
+        max-width: 100%;
+        width: 100%;
+        padding: 0;
+        align-items: flex-start;
+    }
+
+    /* ── Login : plein écran avec marges ────────────────────────────────── */
+    #zone-login {
+        width: 92vw !important;
+        padding: 24px 20px !important;
+        margin: auto;
+    }
+
+    /* ── Zone jeu : plein écran sans relief ─────────────────────────────── */
+    #zone-jeu {
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box;
+        border-radius: 0;
+        padding: 1rem;
+        box-shadow: none;
+        min-height: 100svh;
+        overflow-x: hidden;
+    }
+
+    /* ── Navigation : wrap sur 2 lignes ─────────────────────────────────── */
+    .game-nav {
+        flex-wrap: wrap;
+        gap: 5px;
+        padding: 5px;
+    }
+    .game-nav button {
+        padding: 7px 11px;
+        font-size: 0.80em;
+        flex: 1 1 auto;
+        white-space: nowrap;
+    }
+    .btn-deconnexion {
+        flex: 0 0 auto;
+        margin-left: 0;
+    }
+    .game-nav-right {
+        margin-left: 8px;
+        padding: 2px 4px;
+    }
+
+    /* ── Dashboard : 2 colonnes, 2 lignes ───────────────────────────────── */
+    .user-dashboard-header {
+        flex-wrap: wrap;
+        gap: 6px 0;
+        padding: 10px 12px;
+        margin-bottom: 12px;
+        border-left-width: 3px;
+    }
+    .dash-item {
+        flex: 1 1 50%;
+        min-width: 0;
+    }
+    .dash-clock-item {
+        display: none;
+    }
+
+    /* ── En-têtes de sections ───────────────────────────────────────────── */
+    .market-header, .ranking-header {
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 0;
+    }
+    .sync-status {
+        font-size: 0.78em;
+        padding: 4px 8px;
+    }
+
+    /* ── Barre recherche marché : pleine largeur ────────────────────────── */
+    .market-search {
+        max-width: 100%;
+    }
+
+    /* ── Layout trading : empiler ───────────────────────────────────────── */
+    .trading-layout {
+        flex-direction: column;
+    }
+    .colonne-liste {
+        min-width: unset;
+        width: 100%;
+        overflow-x: hidden;
+    }
+    .colonne-detail {
+        position: static;
+        width: 100%;
+    }
+
+    /* ── Table marché : boutons action côte à côte ──────────────────────── */
+    #market-body td:last-child {
+        flex-direction: row !important;
+        gap: 4px !important;
+        justify-content: center !important;
+        padding: 6px 8px !important;
+    }
+    #market-body td:last-child button {
+        padding: 9px 8px !important;
+        font-size: 0.82em !important;
+        flex: 1 !important;
+        width: auto !important;
+    }
+    /* ── Colonnes masquées sur mobile ───────────────────────────────────── */
+    /* Positions ouvertes : masquer "Quantité" (col 2) et "Valeur" (col 4) */
+    #tab-portefeuille .market-table:not(#portfolio-history-table):not(#trades-history-table) th:nth-child(2),
+    #tab-portefeuille .market-table:not(#portfolio-history-table):not(#trades-history-table) th:nth-child(4),
+    #portfolio-body td:nth-child(2),
+    #portfolio-body td:nth-child(4) { display: none; }
+
+    /* Trades : masquer "Quantité" (col 4) et "Prix unitaire" (col 5) */
+    #trades-history-table th:nth-child(4),
+    #trades-history-table th:nth-child(5),
+    #trades-history-body td:nth-child(4),
+    #trades-history-body td:nth-child(5) { display: none; }
+
+    .market-table th, .market-table td {
+        padding: 13px 10px;
+        font-size: 0.87em;
+    }
+    /* Marché uniquement : forcer le tableau dans sa largeur */
+    #tab-marche .market-table {
+        table-layout: fixed;
+        width: 100%;
+    }
+    #tab-marche .market-table th,
+    #tab-marche .market-table td {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    /* ── Profil joueur : wrap ───────────────────────────────────────────── */
+    .joueur-profil-card {
+        flex-wrap: wrap;
+        gap: 12px;
+        padding: 14px 16px;
+    }
+    .joueur-profil-divider {
+        display: none;
+    }
+    .joueur-profil-stat {
+        flex: 1 1 40%;
+        min-width: 110px;
+    }
+
+    /* ── Résumé portefeuille : wrap ─────────────────────────────────────── */
+    .portfolio-summary {
+        flex-wrap: wrap;
+        gap: 10px 0;
+        padding: 12px 14px;
+    }
+    .summary-item {
+        flex: 1 1 50%;
+        min-width: 0;
+    }
+
+    /* ── Overlay détail : bottom sheet ─────────────────────────────────── */
+    .detail-overlay-bg {
+        align-items: flex-end;
+    }
+    .detail-overlay-panel {
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+        max-height: 92svh;
+        border-radius: 16px 16px 0 0;
+        padding: 20px 16px;
+    }
+    .stats-grid-detail {
+        grid-template-columns: 1fr 1fr;
+    }
+    .prix-gros {
+        font-size: 2em;
+    }
+
+    /* ── Boutons achat/vente : côte à côte, tap-friendly ───────────────── */
+    .trade-box {
+        flex-direction: row;
+        gap: 12px;
+    }
+    .trade-box .btn-achat,
+    .trade-box .btn-vente {
+        flex: 1;
+        padding: 14px 8px;
+        font-size: 1em;
+    }
+
+    /* ── Modale trade : pleine largeur ──────────────────────────────────── */
+    .trade-modal {
+        width: 92%;
+        max-width: 92%;
+        box-sizing: border-box;
+        padding: 20px 16px;
+        border-radius: 12px;
+    }
+
+    /* ── À propos : empiler ─────────────────────────────────────────────── */
+    .propos-grid {
+        flex-direction: column;
+        gap: 0;
+        margin-top: 0;
+    }
+}
+
+/* ── Boutons marché abrégés (≤ 500px) ───────────────────────────────────── */
+@media (max-width: 500px) {
+    #market-body td:last-child .btn-achat,
+    #market-body td:last-child .btn-vente {
+        font-size: 0 !important;
+        min-width: 36px;
+        padding: 9px 0 !important;
+    }
+    #market-body td:last-child .btn-achat::after { content: "A"; font-size: 14px; }
+    #market-body td:last-child .btn-vente::after  { content: "V"; font-size: 14px; }
+}
+
+/* ── Très petits écrans (≤ 360px) ────────────────────────────────────────── */
+@media (max-width: 360px) {
+    .game-nav button {
+        font-size: 0.74em;
+        padding: 6px 8px;
+    }
+    .dash-value {
+        font-size: 0.9em;
+    }
+    .prix-gros {
+        font-size: 1.7em;
+    }
+}

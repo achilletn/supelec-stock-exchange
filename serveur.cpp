@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <cmath>
+#include <random>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
@@ -253,93 +254,245 @@ static bool registerUser(const std::string& user, const std::string& pass, const
     return ok;
 }
 
+// ── Simulation de marché ──────────────────────────────────────────────────
+
+static std::mt19937 rng_sim(std::chrono::steady_clock::now().time_since_epoch().count());
+static double randn() {
+    static std::normal_distribution<double> dist(0.0, 1.0);
+    return dist(rng_sim);
+}
+
+struct SimActif { double prix_initial; double sigma; double drift; };
+static const std::vector<std::string> SIM_SYMBOLES = {
+    "AAPL","MSFT","NVDA","TSLA","GOOGL","AMZN","META","NFLX"
+};
+static const std::map<std::string, SimActif> SIM_CONFIG = {
+    {"AAPL",  {210.0, 0.25, 0.07}},
+    {"MSFT",  {420.0, 0.28, 0.09}},
+    {"NVDA",  {120.0, 0.55, 0.18}},
+    {"TSLA",  {250.0, 0.65, 0.05}},
+    {"GOOGL", {175.0, 0.30, 0.08}},
+    {"AMZN",  {195.0, 0.35, 0.09}},
+    {"META",  {600.0, 0.40, 0.11}},
+    {"NFLX",  {950.0, 0.45, 0.06}},
+};
+
+static std::string toSQLiteDateTime(time_t t) {
+    struct tm* ti = gmtime(&t);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", ti);
+    return std::string(buf);
+}
+
+// Génère l'historique simulé à chaque démarrage (efface et recrée)
+static void genererHistoriqueSimule(sqlite3* db) {
+    std::cout << "[SIM] Purge de l'historique existant..." << std::endl;
+    sqlite3_exec(db, "DELETE FROM historique;", nullptr, 0, nullptr);
+
+    std::cout << "[SIM] Génération de l'historique simulé (5 ans)..." << std::endl;
+
+    sqlite3_stmt* st;
+    time_t now = time(nullptr);
+    // Périodes : {début (secondes avant now), pas en secondes}
+    struct PeriodeDef { long long debut; int pas; };
+    const std::vector<PeriodeDef> periodes = {
+        {5LL*365*86400, 86400  },   // -5Y → -1Y  : 1 point/jour
+        {1LL*365*86400, 21600  },   // -1Y → -30J : 1 point/6h
+        {30LL*86400,    3600   },   // -30J → -7J : 1 point/h
+        {7LL*86400,     1800   },   // -7J → -1J  : 1 point/30min
+        {1LL*86400,     300    },   // -1J → -3H  : 1 point/5min
+        {3LL*3600,      30     },   // -3H → now  : 1 point/30sec
+    };
+
+    sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, 0, nullptr);
+
+    for (const auto& sym : SIM_SYMBOLES) {
+        const auto& cfg = SIM_CONFIG.at(sym);
+        // Partir d'un prix initial plus bas pour que la courbe ait du relief
+        double prix = cfg.prix_initial * 0.35;
+
+        time_t cursor = now - 5LL*365*86400;
+        int pointsIdx = 0;
+
+        for (int p = 0; p < (int)periodes.size(); p++) {
+            time_t fin = (p + 1 < (int)periodes.size())
+                ? now - periodes[p+1].debut
+                : now;
+            int pas = periodes[p].pas;
+            double dt = (double)pas / (252.0 * 86400.0); // fraction d'année
+
+            while (cursor < fin) {
+                // GBM : S(t+dt) = S(t) * exp((mu - σ²/2)*dt + σ*sqrt(dt)*Z)
+                double z = randn();
+                prix *= std::exp((cfg.drift - 0.5*cfg.sigma*cfg.sigma)*dt
+                                 + cfg.sigma * std::sqrt(dt) * z);
+                if (prix < 1.0) prix = 1.0;
+
+                std::string ts = toSQLiteDateTime(cursor);
+                if (sqlite3_prepare_v2(db,
+                    "INSERT OR IGNORE INTO historique (symbole, prix, timestamp) VALUES (?, ?, ?);",
+                    -1, &st, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(st, 1, sym.c_str(), -1, SQLITE_STATIC);
+                    sqlite3_bind_double(st, 2, prix);
+                    sqlite3_bind_text(st, 3, ts.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(st);
+                }
+                sqlite3_finalize(st);
+
+                cursor += pas;
+                pointsIdx++;
+            }
+        }
+        // Initialiser marcheMondial avec le dernier prix généré
+        {
+            std::lock_guard<std::mutex> lock(marcheMutex);
+            marcheMondial[sym].prix  = prix;
+            marcheMondial[sym].close = prix;
+            marcheMondial[sym].nom   = sym;
+        }
+        std::cout << "[SIM] " << sym << " généré (" << pointsIdx << " points), prix actuel = " << prix << " $" << std::endl;
+    }
+
+    sqlite3_exec(db, "COMMIT;", nullptr, 0, nullptr);
+    std::cout << "[SIM] Historique généré avec succès." << std::endl;
+}
+
+// Rafraîchit variation_24h, open, high, low depuis l'historique
+static void refreshStatsMarcheSimule() {
+    sqlite3* db = openDatabase();
+    sqlite3_stmt* st;
+    for (const auto& sym : SIM_SYMBOLES) {
+        double prix_24h = 0.0, open_v = 0.0, high_v = 0.0, low_v = 0.0;
+
+        if (sqlite3_prepare_v2(db,
+            "SELECT prix FROM historique WHERE symbole = ? AND timestamp <= datetime('now','-24 hours') ORDER BY timestamp DESC LIMIT 1;",
+            -1, &st, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, sym.c_str(), -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) prix_24h = sqlite3_column_double(st, 0);
+        }
+        sqlite3_finalize(st);
+
+        if (sqlite3_prepare_v2(db,
+            "SELECT prix FROM historique WHERE symbole = ? AND timestamp >= datetime('now','-24 hours') ORDER BY timestamp ASC LIMIT 1;",
+            -1, &st, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, sym.c_str(), -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) open_v = sqlite3_column_double(st, 0);
+        }
+        sqlite3_finalize(st);
+
+        if (sqlite3_prepare_v2(db,
+            "SELECT MIN(prix), MAX(prix) FROM historique WHERE symbole = ? AND timestamp >= datetime('now','-24 hours');",
+            -1, &st, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, sym.c_str(), -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                low_v  = sqlite3_column_double(st, 0);
+                high_v = sqlite3_column_double(st, 1);
+            }
+        }
+        sqlite3_finalize(st);
+
+        std::lock_guard<std::mutex> lock(marcheMutex);
+        auto& a = marcheMondial[sym];
+        if (prix_24h > 0.0) a.variation_24h = (a.prix - prix_24h) / prix_24h * 100.0;
+        if (open_v  > 0.0) a.open = open_v;
+        if (high_v  > 0.0) a.high = high_v;
+        if (low_v   > 0.0) a.low  = low_v;
+    }
+    sqlite3_close(db);
+}
+
+// Worker simulation : random walk toutes les 5s, refresh stats toutes les 60s
+void workerSimulerCours() {
+    const double DT = 5.0 / (252.0 * 86400.0); // pas de 5s en fraction d'année
+    int tick = 0;
+    // Attendre que marcheMondial soit initialisé
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(marcheMutex);
+            for (const auto& sym : SIM_SYMBOLES) {
+                if (!SIM_CONFIG.count(sym)) continue;
+                const auto& cfg = SIM_CONFIG.at(sym);
+                auto& a = marcheMondial[sym];
+                if (a.prix <= 0.0) a.prix = cfg.prix_initial;
+
+                double z = randn();
+                a.prix *= std::exp((cfg.drift - 0.5*cfg.sigma*cfg.sigma)*DT
+                                   + cfg.sigma * std::sqrt(DT) * z);
+                if (a.prix < 0.5) a.prix = 0.5;
+                a.close = a.prix;
+                a.nom   = sym;
+            }
+        }
+        lastMarketUpdateMs.store(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()
+            ).count()
+        );
+
+        // Refresh stats toutes les 60s (tick = 12 × 5s)
+        if (++tick >= 12) {
+            tick = 0;
+            refreshStatsMarcheSimule();
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+}
+
 // ── Workers ───────────────────────────────────────────────────────────────
 
+/* [API DÉSACTIVÉE — conservée pour réactivation future]
 void workerActualiserCours() {
-    // Liste des actifs à suivre — 8 max pour rester dans le quota (8 calls/min)
     const std::vector<std::string> mesActifs = {
         "AAPL", "MSFT", "NVDA", "TSLA", "GOOGL", "AMZN", "META", "NFLX"
     };
-
-    // Construire la chaîne "AAPL,MSFT,..." pour la requête batch
     std::string symbols;
     for (size_t i = 0; i < mesActifs.size(); ++i)
         symbols += mesActifs[i] + (i < mesActifs.size() - 1 ? "," : "");
-
     while (true) {
         try {
             httplib::Client cli("https://api.twelvedata.com");
-            cli.set_connection_timeout(10);
-            cli.set_read_timeout(10);
-
-            // 1 requête batch = 8 credits (1 par symbole)
+            cli.set_connection_timeout(10); cli.set_read_timeout(10);
             std::string path = "/quote?symbol=" + symbols + "&apikey=" + TWELVEDATA_API_KEY;
             auto res = cli.Get(path.c_str());
-
             if (res && res->status == 200) {
                 auto j = json::parse(res->body);
-
-                // Vérification quota dépassé (code 429 dans le body)
                 if (j.contains("code") && j["code"] == 429) {
-                    std::cout << "[QUOTA] Limite TwelveData atteinte, pause forcée." << std::endl;
+                    std::cout << "[QUOTA] Limite TwelveData atteinte." << std::endl;
                 } else {
                     std::lock_guard<std::mutex> lock(marcheMutex);
-
                     for (auto it = j.begin(); it != j.end(); ++it) {
                         const std::string& sym = it.key();
                         const auto& data = it.value();
-
-                        if (!data.is_object() || !data.contains("close")) {
-                            std::cout << "  [SKIP] " << sym << " : données manquantes" << std::endl;
-                            continue;
-                        }
-
+                        if (!data.is_object() || !data.contains("close")) continue;
                         try {
                             double prix = std::stod(data["close"].get<std::string>());
                             if (prix <= 0.0) continue;
-
-                            marcheMondial[sym].prix   = prix;
-                            marcheMondial[sym].close  = prix;
-                            marcheMondial[sym].nom    = data.value("name", sym);
-
+                            marcheMondial[sym].prix  = prix; marcheMondial[sym].close = prix;
+                            marcheMondial[sym].nom   = data.value("name", sym);
                             if (data.contains("percent_change"))
                                 marcheMondial[sym].variation_24h = std::stod(data["percent_change"].get<std::string>());
                             if (data.contains("open") && data["open"].is_string())
-                                marcheMondial[sym].open  = std::stod(data["open"].get<std::string>());
+                                marcheMondial[sym].open = std::stod(data["open"].get<std::string>());
                             if (data.contains("high") && data["high"].is_string())
-                                marcheMondial[sym].high  = std::stod(data["high"].get<std::string>());
+                                marcheMondial[sym].high = std::stod(data["high"].get<std::string>());
                             if (data.contains("low") && data["low"].is_string())
-                                marcheMondial[sym].low   = std::stod(data["low"].get<std::string>());
-
-                            std::cout << "  [OK] " << sym << " = " << prix << " $" << std::endl;
-                        } catch (...) {
-                            std::cout << "  [SKIP] " << sym << " : parsing échoué" << std::endl;
-                        }
+                                marcheMondial[sym].low  = std::stod(data["low"].get<std::string>());
+                        } catch (...) {}
                     }
-
-                    // Horodatage de la dernière mise à jour réussie (ms depuis epoch)
                     lastMarketUpdateMs.store(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()
-                        ).count()
-                    );
+                            std::chrono::system_clock::now().time_since_epoch()).count());
                 }
-            } else if (res) {
-                std::cout << "[ERREUR TWELVEDATA] HTTP " << res->status << std::endl;
-                std::cout << "[ERREUR TWELVEDATA] Body : " << res->body << std::endl;
-            } else {
-                auto err = res.error();
-                std::cout << "[ERREUR TWELVEDATA] Pas de réponse : " << httplib::to_string(err) << std::endl;
             }
         } catch (const std::exception& e) {
             std::cout << "  [EXCEPTION] " << e.what() << std::endl;
         }
-
-        // 8 symboles = 8 credits — on attend 65s pour rester sous 8 calls/min
-        std::cout << "[INFO] Cycle fini. Pause de 65s..." << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(65));
     }
 }
+*/
 
 static double calculerValeurPortefeuille(sqlite3* db, int uid) {
     double valeur = 0.0;
@@ -372,13 +525,13 @@ int main() {
         std::cerr << "[FATAL] Les variables d'environnement ADMIN_USER et ADMIN_PASS doivent être définies." << std::endl;
         return 1;
     }
-    if (!envApiKey || std::string(envApiKey).empty()) {
-        std::cerr << "[FATAL] La variable d'environnement TWELVEDATA_API_KEY doit être définie." << std::endl;
-        return 1;
-    }
-    ADMIN_USER         = envUser;
-    ADMIN_PASS         = envPass;
-    TWELVEDATA_API_KEY = envApiKey;
+    // API key optionnelle (mode simulation actif)
+    ADMIN_USER = envUser;
+    ADMIN_PASS = envPass;
+    if (envApiKey && !std::string(envApiKey).empty())
+        TWELVEDATA_API_KEY = envApiKey;
+    else
+        std::cout << "[INFO] TWELVEDATA_API_KEY non définie — mode simulation activé." << std::endl;
 
     sqlite3* db = openDatabase();
     
@@ -481,9 +634,13 @@ int main() {
         }
     }
 
+    // Générer l'historique simulé (purge + recréation à chaque démarrage)
+    genererHistoriqueSimule(db);
+
     sqlite3_close(db);
 
-    std::thread(workerActualiserCours).detach();
+    // Démarrer le worker de simulation (remplace workerActualiserCours)
+    std::thread(workerSimulerCours).detach();
 
     // Routine : Snapshots 24h + enregistrement daily_history
     std::thread([]() {
@@ -828,25 +985,91 @@ int main() {
 
         std::string symbole = req.get_param_value("symbole");
         std::string periode = req.has_param("periode") ? req.get_param_value("periode") : "24h";
-        std::string depuis  = req.has_param("depuis")  ? req.get_param_value("depuis")  : "";
 
         // Whitelist stricte sur la période — pas de concaténation dans le SQL
-        if (periode != "1h" && periode != "24h" && periode != "7d") periode = "24h";
+        if (periode != "1h" && periode != "3h" && periode != "24h" && periode != "7d" &&
+            periode != "1m" && periode != "3m" && periode != "1y" && periode != "5y")
+            periode = "24h";
 
-        // Requêtes SQL entièrement statiques, sélectionnées par période
-        static const char* SQL_DEPUIS_1H  = "SELECT prix, strftime('%H:%M:%S', timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp > ? ORDER BY timestamp ASC;";
-        static const char* SQL_DEPUIS_24H = "SELECT prix, strftime('%H:%M',    timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp > ? ORDER BY timestamp ASC;";
-        static const char* SQL_DEPUIS_7D  = "SELECT prix, strftime('%d/%m %H:00', timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp > ? ORDER BY timestamp ASC;";
-        static const char* SQL_1H  = "SELECT prix, strftime('%H:%M:%S', timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp >= datetime('now', '-1 hour')  ORDER BY timestamp ASC;";
-        static const char* SQL_24H = "SELECT prix, strftime('%H:%M',    timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp >= datetime('now', '-24 hours') ORDER BY timestamp ASC;";
-        static const char* SQL_7D  = "SELECT prix, strftime('%d/%m %H:00', timestamp), timestamp FROM historique WHERE symbole = ? AND timestamp >= datetime('now', '-7 days')  ORDER BY timestamp ASC;";
+        // Requêtes SQL avec bucketing temporel pour un axe X uniforme
+        // Buckets calibrés pour ~160-180 points par fenêtre
+        static const char* SQL_1H =   // 60 min  / 30sec  = 120 pts
+            "SELECT AVG(prix),"
+            " strftime('%H:%M:', timestamp) || printf('%02d', (CAST(strftime('%S', timestamp) AS INTEGER) / 30) * 30),"
+            " strftime('%Y-%m-%d %H:%M:', timestamp) || printf('%02d', (CAST(strftime('%S', timestamp) AS INTEGER) / 30) * 30)"
+            " FROM historique WHERE symbole = ?"
+            " AND timestamp >= datetime('now', '-1 hour')"
+            " GROUP BY strftime('%Y-%m-%d %H:%M', timestamp), (CAST(strftime('%S', timestamp) AS INTEGER) / 30)"
+            " ORDER BY 3 ASC;";
+
+        static const char* SQL_3H =   // 180 min / 1-min  = 180 pts
+            "SELECT AVG(prix), strftime('%H:%M', timestamp),"
+            " strftime('%Y-%m-%d %H:%M', timestamp) || ':00'"
+            " FROM historique WHERE symbole = ?"
+            " AND timestamp >= datetime('now', '-3 hours')"
+            " GROUP BY strftime('%Y-%m-%d %H:%M', timestamp)"
+            " ORDER BY 3 ASC;";
+
+        static const char* SQL_24H =  // 24h    / 8-min   = 180 pts
+            "SELECT AVG(prix),"
+            " strftime('%H:', timestamp) || printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / 8) * 8),"
+            " strftime('%Y-%m-%d %H:', timestamp) || printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / 8) * 8) || ':00'"
+            " FROM historique WHERE symbole = ?"
+            " AND timestamp >= datetime('now', '-24 hours')"
+            " GROUP BY strftime('%Y-%m-%d %H', timestamp), (CAST(strftime('%M', timestamp) AS INTEGER) / 8)"
+            " ORDER BY 3 ASC;";
+
+        static const char* SQL_7D =   // 7j     / 1h      = 168 pts
+            "SELECT AVG(prix), strftime('%d/%m %H:00', timestamp),"
+            " strftime('%Y-%m-%d %H:00:00', timestamp)"
+            " FROM historique WHERE symbole = ?"
+            " AND timestamp >= datetime('now', '-7 days')"
+            " GROUP BY strftime('%Y-%m-%d %H', timestamp)"
+            " ORDER BY 3 ASC;";
+
+        static const char* SQL_1M =   // 30j    / 4h      = 180 pts
+            "SELECT AVG(prix),"
+            " strftime('%d/%m ', timestamp) || printf('%02d:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 4) * 4),"
+            " strftime('%Y-%m-%d ', timestamp) || printf('%02d:00:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 4) * 4)"
+            " FROM historique WHERE symbole = ?"
+            " AND timestamp >= datetime('now', '-1 month')"
+            " GROUP BY strftime('%Y-%m-%d', timestamp), (CAST(strftime('%H', timestamp) AS INTEGER) / 4)"
+            " ORDER BY 3 ASC;";
+
+        static const char* SQL_3M =   // 90j    / 12h     = 180 pts
+            "SELECT AVG(prix),"
+            " strftime('%d/%m ', timestamp) || printf('%02d:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 12) * 12),"
+            " strftime('%Y-%m-%d ', timestamp) || printf('%02d:00:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 12) * 12)"
+            " FROM historique WHERE symbole = ?"
+            " AND timestamp >= datetime('now', '-3 months')"
+            " GROUP BY strftime('%Y-%m-%d', timestamp), (CAST(strftime('%H', timestamp) AS INTEGER) / 12)"
+            " ORDER BY 3 ASC;";
+
+        static const char* SQL_1Y =   // 365j   / 2j      = ~182 pts
+            "SELECT AVG(prix), strftime('%d/%m', MIN(timestamp)),"
+            " strftime('%Y', timestamp) || printf('-%03d', (CAST(strftime('%j', timestamp) AS INTEGER) / 2) * 2)"
+            " FROM historique WHERE symbole = ?"
+            " AND timestamp >= datetime('now', '-1 year')"
+            " GROUP BY strftime('%Y', timestamp), (CAST(strftime('%j', timestamp) AS INTEGER) / 2)"
+            " ORDER BY 3 ASC;";
+
+        static const char* SQL_5Y =   // 5*365j / 10j     = ~182 pts
+            "SELECT AVG(prix), strftime('%d/%m', MIN(timestamp)),"
+            " strftime('%Y', timestamp) || printf('-%03d', (CAST(strftime('%j', timestamp) AS INTEGER) / 10) * 10)"
+            " FROM historique WHERE symbole = ?"
+            " AND timestamp >= datetime('now', '-5 years')"
+            " GROUP BY strftime('%Y', timestamp), (CAST(strftime('%j', timestamp) AS INTEGER) / 10)"
+            " ORDER BY 3 ASC;";
 
         const char* sql;
-        if (!depuis.empty()) {
-            sql = (periode == "1h") ? SQL_DEPUIS_1H : (periode == "7d") ? SQL_DEPUIS_7D : SQL_DEPUIS_24H;
-        } else {
-            sql = (periode == "1h") ? SQL_1H : (periode == "7d") ? SQL_7D : SQL_24H;
-        }
+        if      (periode == "1h")  sql = SQL_1H;
+        else if (periode == "3h")  sql = SQL_3H;
+        else if (periode == "7d")  sql = SQL_7D;
+        else if (periode == "1m")  sql = SQL_1M;
+        else if (periode == "3m")  sql = SQL_3M;
+        else if (periode == "1y")  sql = SQL_1Y;
+        else if (periode == "5y")  sql = SQL_5Y;
+        else                       sql = SQL_24H;
 
         sqlite3* db = openDatabase();
         sqlite3_stmt* stmt;
@@ -854,7 +1077,6 @@ int main() {
 
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, symbole.c_str(), -1, SQLITE_STATIC);
-            if (!depuis.empty()) sqlite3_bind_text(stmt, 2, depuis.c_str(), -1, SQLITE_STATIC);
             
             while (sqlite3_step(stmt) == SQLITE_ROW) {
                 j.push_back({
@@ -970,7 +1192,7 @@ int main() {
         }
         // 1. NOUVEAU CALCUL AVEC FRAIS
         double valeurTrade = prix * quantite;
-        double frais = valeurTrade * 0.005; // 0.5%
+        double frais = valeurTrade * 0.002; // 0.5%
         double coutAchat = valeurTrade + frais;
         double gainVente = valeurTrade - frais;
 
@@ -1158,6 +1380,44 @@ int main() {
         };
         sqlite3_close(db);
         res.set_content(j.dump(), "application/json");
+    });
+
+    // GET /api/trades/historique — historique personnel des trades (100 derniers)
+    svr.Get("/api/trades/historique", [](const httplib::Request& req, httplib::Response& res) {
+        std::string user = getCookieUser(req);
+        if (user.empty()) { res.status = 401; return; }
+
+        sqlite3* db = openDatabase();
+        int uid = getUserId(db, user);
+        if (uid == -1) { sqlite3_close(db); res.status = 404; return; }
+
+        json trades = json::array();
+        sqlite3_stmt* stmt;
+        const char* sql =
+            "SELECT action, symbole, quantite, prix, valeur, "
+            "strftime('%d/%m/%Y %H:%M', timestamp) "
+            "FROM trades_log WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT 100;";
+
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(stmt, 1, uid);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                std::string action  = (const char*)sqlite3_column_text(stmt, 0);
+                std::string symbole = (const char*)sqlite3_column_text(stmt, 1);
+                double quantite     = sqlite3_column_double(stmt, 2);
+                double prix         = sqlite3_column_double(stmt, 3);
+                double valeur       = sqlite3_column_double(stmt, 4);
+                std::string ts      = (const char*)sqlite3_column_text(stmt, 5);
+                trades.push_back({
+                    {"action", action}, {"symbole", symbole},
+                    {"quantite", quantite}, {"prix", prix},
+                    {"valeur", valeur}, {"timestamp", ts}
+                });
+            }
+        }
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        res.set_content(trades.dump(), "application/json");
     });
 
     // GET /api/portefeuille/historique
