@@ -264,9 +264,21 @@ static double randn() {
 
 struct SimActif { double prix_initial; double sigma; double drift; };
 static const std::vector<std::string> SIM_SYMBOLES = {
-    "AAPL","MSFT","NVDA","TSLA","GOOGL","AMZN","META","NFLX"
+    // Big tech
+    "AAPL","MSFT","NVDA","TSLA","GOOGL","AMZN","META","NFLX",
+    // Semiconducteurs
+    "AMD","INTC","QCOM","AVGO","TSM","ASML","MU","AMAT",
+    // Finance
+    "JPM","GS","BAC","V","MA","BRK","AXP","BLK",
+    // Santé & pharma
+    "JNJ","PFE","LLY","ABBV","MRK","UNH","BMY","GILD",
+    // Industrie & énergie
+    "XOM","CVX","NEE","CAT","BA","GE","RTX","HON",
+    // Consommation & retail
+    "WMT","COST","TGT","NKE","SBUX","MCD","DIS","PYPL"
 };
 static const std::map<std::string, SimActif> SIM_CONFIG = {
+    // Big tech
     {"AAPL",  {210.0, 0.25, 0.07}},
     {"MSFT",  {420.0, 0.28, 0.09}},
     {"NVDA",  {120.0, 0.55, 0.18}},
@@ -275,6 +287,51 @@ static const std::map<std::string, SimActif> SIM_CONFIG = {
     {"AMZN",  {195.0, 0.35, 0.09}},
     {"META",  {600.0, 0.40, 0.11}},
     {"NFLX",  {950.0, 0.45, 0.06}},
+    // Semiconducteurs
+    {"AMD",   {180.0, 0.50, 0.12}},
+    {"INTC",  { 35.0, 0.35, 0.02}},
+    {"QCOM",  {170.0, 0.35, 0.07}},
+    {"AVGO",  {185.0, 0.30, 0.10}},
+    {"TSM",   {130.0, 0.32, 0.09}},
+    {"ASML",  {850.0, 0.30, 0.11}},
+    {"MU",    { 90.0, 0.50, 0.08}},
+    {"AMAT",  {200.0, 0.40, 0.10}},
+    // Finance
+    {"JPM",   {215.0, 0.22, 0.08}},
+    {"GS",    {520.0, 0.25, 0.07}},
+    {"BAC",   { 42.0, 0.28, 0.06}},
+    {"V",     {290.0, 0.20, 0.09}},
+    {"MA",    {480.0, 0.22, 0.09}},
+    {"BRK",   {440.0, 0.18, 0.07}},
+    {"AXP",   {265.0, 0.28, 0.08}},
+    {"BLK",   {920.0, 0.25, 0.08}},
+    // Santé & pharma
+    {"JNJ",   {155.0, 0.18, 0.05}},
+    {"PFE",   { 28.0, 0.30, 0.03}},
+    {"LLY",   {800.0, 0.32, 0.14}},
+    {"ABBV",  {175.0, 0.25, 0.07}},
+    {"MRK",   {130.0, 0.22, 0.06}},
+    {"UNH",   {530.0, 0.22, 0.09}},
+    {"BMY",   { 58.0, 0.28, 0.04}},
+    {"GILD",  { 90.0, 0.25, 0.05}},
+    // Industrie & énergie
+    {"XOM",   {110.0, 0.28, 0.05}},
+    {"CVX",   {155.0, 0.27, 0.05}},
+    {"NEE",   { 72.0, 0.22, 0.06}},
+    {"CAT",   {350.0, 0.28, 0.08}},
+    {"BA",    {190.0, 0.42, 0.03}},
+    {"GE",    {170.0, 0.30, 0.07}},
+    {"RTX",   {120.0, 0.25, 0.07}},
+    {"HON",   {225.0, 0.22, 0.07}},
+    // Consommation & retail
+    {"WMT",   { 95.0, 0.18, 0.06}},
+    {"COST",  {890.0, 0.20, 0.09}},
+    {"TGT",   {145.0, 0.30, 0.05}},
+    {"NKE",   { 92.0, 0.28, 0.06}},
+    {"SBUX",  { 95.0, 0.30, 0.05}},
+    {"MCD",   {295.0, 0.18, 0.07}},
+    {"DIS",   { 95.0, 0.32, 0.04}},
+    {"PYPL",  { 70.0, 0.45, 0.04}},
 };
 
 static std::string toSQLiteDateTime(time_t t) {
@@ -636,8 +693,10 @@ int main() {
 
     // Générer l'historique simulé (purge + recréation à chaque démarrage)
     genererHistoriqueSimule(db);
-
     sqlite3_close(db);
+
+    // Pré-calculer high/low/open/variation immédiatement (sinon on attend 60s)
+    refreshStatsMarcheSimule();
 
     // Démarrer le worker de simulation (remplace workerActualiserCours)
     std::thread(workerSimulerCours).detach();
@@ -988,7 +1047,7 @@ int main() {
 
         // Whitelist stricte sur la période — pas de concaténation dans le SQL
         if (periode != "1h" && periode != "3h" && periode != "24h" && periode != "7d" &&
-            periode != "1m" && periode != "3m" && periode != "1y" && periode != "5y")
+            periode != "1m" && periode != "4m" && periode != "1y" && periode != "5y")
             periode = "24h";
 
         // Requêtes SQL avec bucketing temporel pour un axe X uniforme
@@ -1036,13 +1095,13 @@ int main() {
             " GROUP BY strftime('%Y-%m-%d', timestamp), (CAST(strftime('%H', timestamp) AS INTEGER) / 4)"
             " ORDER BY 3 ASC;";
 
-        static const char* SQL_3M =   // 90j    / 12h     = 180 pts
+        static const char* SQL_4M =   // 120j   / 16h     = ~180 pts
             "SELECT AVG(prix),"
-            " strftime('%d/%m ', timestamp) || printf('%02d:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 12) * 12),"
-            " strftime('%Y-%m-%d ', timestamp) || printf('%02d:00:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 12) * 12)"
+            " strftime('%d/%m ', timestamp) || printf('%02d:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 16) * 16),"
+            " strftime('%Y-%m-%d ', timestamp) || printf('%02d:00:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 16) * 16)"
             " FROM historique WHERE symbole = ?"
-            " AND timestamp >= datetime('now', '-3 months')"
-            " GROUP BY strftime('%Y-%m-%d', timestamp), (CAST(strftime('%H', timestamp) AS INTEGER) / 12)"
+            " AND timestamp >= datetime('now', '-4 months')"
+            " GROUP BY strftime('%Y-%m-%d', timestamp), (CAST(strftime('%H', timestamp) AS INTEGER) / 16)"
             " ORDER BY 3 ASC;";
 
         static const char* SQL_1Y =   // 365j   / 2j      = ~182 pts
@@ -1066,7 +1125,7 @@ int main() {
         else if (periode == "3h")  sql = SQL_3H;
         else if (periode == "7d")  sql = SQL_7D;
         else if (periode == "1m")  sql = SQL_1M;
-        else if (periode == "3m")  sql = SQL_3M;
+        else if (periode == "4m")  sql = SQL_4M;
         else if (periode == "1y")  sql = SQL_1Y;
         else if (periode == "5y")  sql = SQL_5Y;
         else                       sql = SQL_24H;

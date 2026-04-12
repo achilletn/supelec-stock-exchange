@@ -61,7 +61,108 @@ let tickCount = 0;
 let prixActuel = 0;
 let graphiquePremierChargement = true;
 
-const PERIODE_ORDER = ['1h', '3h', '24h', '7d', '1m', '3m', '1y', '5y'];
+// ── Scroll lock robuste (position:fixed, iOS-safe) ───────────────────────────
+let _scrollLockCount = 0;
+let _scrollLockY = 0;
+let _touchLockStartY = 0;
+function _onTouchLockStart(e) {
+    _touchLockStartY = e.touches[0].clientY;
+}
+function _preventTouch(e) {
+    const panels = ['panneau-detail', 'trade-modal'];
+    const panelEl = panels.map(id => document.getElementById(id)).find(el => el?.contains(e.target));
+    if (panelEl) {
+        // Bloquer pull-to-refresh : si panel en haut et swipe vers le bas → preventDefault
+        const dy = e.touches[0].clientY - _touchLockStartY;
+        if (panelEl.scrollTop <= 0 && dy > 0) e.preventDefault();
+        return;
+    }
+    e.preventDefault();
+}
+function lockScroll() {
+    if (++_scrollLockCount === 1) {
+        _scrollLockY = window.scrollY;
+        document.body.style.position = 'fixed';
+        document.body.style.top      = `-${_scrollLockY}px`;
+        document.body.style.width    = '100%';
+        document.addEventListener('touchstart', _onTouchLockStart, { passive: true });
+        document.addEventListener('touchmove',  _preventTouch,     { passive: false });
+    }
+}
+function unlockScroll() {
+    if (--_scrollLockCount <= 0) {
+        _scrollLockCount = 0;
+        document.removeEventListener('touchstart', _onTouchLockStart);
+        document.removeEventListener('touchmove',  _preventTouch);
+        document.body.style.position = '';
+        document.body.style.top      = '';
+        document.body.style.width    = '';
+        window.scrollTo(0, _scrollLockY);
+    }
+}
+
+const PERIODE_ORDER = ['1h', '3h', '24h', '7d', '1m', '4m', '1y', '5y'];
+
+const NOM_ACTIF = {
+    "AAPL":"Apple",        "MSFT":"Microsoft",     "NVDA":"NVIDIA",        "TSLA":"Tesla",
+    "GOOGL":"Alphabet",    "AMZN":"Amazon",         "META":"Meta",          "NFLX":"Netflix",
+    "AMD":"AMD",           "INTC":"Intel",          "QCOM":"Qualcomm",      "AVGO":"Broadcom",
+    "TSM":"TSMC",          "ASML":"ASML",           "MU":"Micron",          "AMAT":"Appl. Materials",
+    "JPM":"JPMorgan",      "GS":"Goldman Sachs",    "BAC":"Bank of America","V":"Visa",
+    "MA":"Mastercard",     "BRK":"Berkshire",       "AXP":"Amex",           "BLK":"BlackRock",
+    "JNJ":"J&J",           "PFE":"Pfizer",          "LLY":"Eli Lilly",      "ABBV":"AbbVie",
+    "MRK":"Merck",         "UNH":"UnitedHealth",    "BMY":"Bristol-Myers",  "GILD":"Gilead",
+    "XOM":"ExxonMobil",    "CVX":"Chevron",         "NEE":"NextEra",        "CAT":"Caterpillar",
+    "BA":"Boeing",         "GE":"GE Aerospace",     "RTX":"RTX Corp",       "HON":"Honeywell",
+    "WMT":"Walmart",       "COST":"Costco",         "TGT":"Target",         "NKE":"Nike",
+    "SBUX":"Starbucks",    "MCD":"McDonald's",      "DIS":"Disney",         "PYPL":"PayPal",
+};
+
+let affichageNom = false;
+let dernierActifs = [];
+
+function labelActif(sym) {
+    return affichageNom && NOM_ACTIF[sym] ? NOM_ACTIF[sym] : sym;
+}
+
+function setAffichageNom(useNom) {
+    affichageNom = useNom;
+    document.querySelectorAll(".actif-display-toggle").forEach(t => t.classList.toggle("nom-actif", useNom));
+    afficherTableauMarche();
+    afficherActifs(dernierActifs);
+    // Mettre à jour les panneaux ouverts
+    if (symboleActuel) {
+        const detailTitre = document.getElementById("detail-titre");
+        if (detailTitre) detailTitre.innerText = labelActif(symboleActuel);
+        const tradeSymbole = document.getElementById("trade-modal-symbole");
+        if (tradeSymbole) tradeSymbole.innerText = labelActif(symboleActuel);
+    }
+}
+const PERIODE_SEC   = { '1h': 3600, '3h': 10800, '24h': 86400, '7d': 604800,
+                        '1m': 2592000, '4m': 10368000, '1y': 31536000, '5y': 157680000 };
+
+let axeAnimRafId = null;
+
+// Anime x.min d'un chart Chart.js de fromMin → toMin sur `duration` ms
+function animerAxe(chart, fromMin, toMin, duration, easing, onComplete) {
+    if (axeAnimRafId) cancelAnimationFrame(axeAnimRafId);
+    const start = performance.now();
+    function step(now) {
+        const t = Math.min((now - start) / duration, 1);
+        const e = easing === 'in'  ? t * t * t
+                : easing === 'out' ? 1 - (1 - t) * (1 - t) * (1 - t)
+                :                    t < 0.5 ? 4*t*t*t : 1 - 4*(1-t)*(1-t)*(1-t);
+        chart.options.scales.x.min = Math.round(fromMin + (toMin - fromMin) * e);
+        chart.update('none');
+        if (t < 1) {
+            axeAnimRafId = requestAnimationFrame(step);
+        } else {
+            axeAnimRafId = null;
+            if (onComplete) onComplete();
+        }
+    }
+    axeAnimRafId = requestAnimationFrame(step);
+}
 
 const tickHandlers = new Set();
 const syncClockHandles = {};
@@ -237,16 +338,67 @@ function demarrerJeu() {
     actualiserDashboard();
     setInterval(actualiserDashboard, 30000);
     startMasterTick();
+    initStickyNav();
+    initDetailMobileDismiss();
 
     restaurerUI();
+}
+
+function initDetailMobileDismiss() {
+    [
+        { el: document.getElementById('panneau-detail'), close: () => fermerDetail() },
+        { el: document.getElementById('trade-modal'),    close: () => fermerModalTrade(null) },
+    ].forEach(({ el, close }) => {
+        let startY = 0;
+        el.addEventListener('touchstart', e => {
+            startY = e.touches[0].clientY;
+        }, { passive: true });
+        el.addEventListener('touchend', e => {
+            if (window.innerWidth > 700) return;
+            const delta = e.changedTouches[0].clientY - startY;
+            if (delta > 60 && el.scrollTop < 10) close();
+        }, { passive: true });
+    });
+}
+
+function initStickyNav() {
+    const sticky = document.getElementById('game-nav-sticky');
+    const orig   = document.querySelector('#zone-jeu > nav.game-nav:not(.game-nav-sticky)');
+    if (!sticky || !orig) return;
+
+    let lastY   = window.scrollY;
+    let ticking = false;
+
+    window.addEventListener('scroll', function() {
+        if (ticking) return;
+        ticking = true;
+        requestAnimationFrame(function() {
+            ticking = false;
+            if (_scrollLockCount > 0) return; // panel ouvert → ignorer
+            const y         = window.scrollY;
+            const origBelow = orig.getBoundingClientRect().top > 15;
+            const mobile    = window.innerWidth <= 700;
+
+            if (origBelow) {
+                sticky.classList.remove('nav-visible');
+            } else if (mobile) {
+                const delta = y - lastY;
+                if (delta < -8)     sticky.classList.add('nav-visible');
+                else if (delta > 5) sticky.classList.remove('nav-visible');
+            } else {
+                sticky.classList.add('nav-visible');
+            }
+
+            lastY = y;
+        });
+    }, { passive: true });
 }
 
 function switchTab(tabName) {
     localStorage.setItem("dernierTab", tabName);
     sauvegarderUI();
     document.querySelectorAll(".game-nav [data-tab]").forEach(b => b.classList.remove("active"));
-    const activeBtn = document.querySelector(`.game-nav [data-tab="${tabName}"]`);
-    if (activeBtn) activeBtn.classList.add("active");
+    document.querySelectorAll(`.game-nav [data-tab="${tabName}"]`).forEach(b => b.classList.add("active"));
     document.querySelectorAll(".tab-content").forEach(t => (t.style.display = "none"));
     
     const target = document.getElementById(`tab-${tabName}`);
@@ -317,7 +469,10 @@ function afficherTableauMarche() {
     // Filtrage
     let données = donneesMarche;
     if (filtreMarche) {
-        données = données.filter(a => a.symbol.toUpperCase().includes(filtreMarche));
+        données = données.filter(a =>
+            a.symbol.toUpperCase().includes(filtreMarche) ||
+            (NOM_ACTIF[a.symbol] || "").toUpperCase().includes(filtreMarche)
+        );
     }
 
     // Tri
@@ -362,7 +517,7 @@ function afficherTableauMarche() {
         const variColor = action.variation_24h >= 0 ? "#2ecc71" : "#e74c3c";
         const variSign  = action.variation_24h >= 0 ? "+" : "";
         tr.innerHTML = `
-            <td><span class="lien-actif"><strong>${action.symbol}</strong></span></td>
+            <td><span class="lien-actif"><strong>${labelActif(action.symbol)}</strong></span></td>
             <td class="price">${formatDevise(action.price)}</td>
             <td style="font-family:'JetBrains Mono','Courier New',monospace; font-weight:bold; color:${variColor};">
                 ${variSign}${action.variation_24h.toFixed(2)}%
@@ -492,6 +647,7 @@ function arreterBouclePortefeuille() {
 }
 
 function afficherActifs(actifs) {
+    dernierActifs = actifs;
     const tbody = document.getElementById("portfolio-body");
     if (!tbody) return;
     tbody.innerHTML = "";
@@ -502,7 +658,7 @@ function afficherActifs(actifs) {
             : ligne.pnl_alltime_pct?.startsWith("-") ? "#e74c3c" : "#888";
         const tr = document.createElement("tr");
         tr.innerHTML = `
-            <td><a href="#" class="lien-actif" onclick="voirDetail('${ligne.symbole}');return false;"><strong>${ligne.symbole}</strong></a></td>
+            <td><a href="#" class="lien-actif" onclick="voirDetail('${ligne.symbole}');return false;"><strong>${labelActif(ligne.symbole)}</strong></a></td>
             <td style="font-family:'Courier New',monospace;">${formatNum(ligne.quantite, 6)}</td>
             <td style="font-family:'Courier New',monospace;">${ligne.prix_unitaire > 0 ? formatDevise(ligne.prix_unitaire) : "—"}</td>
             <td style="font-family:'Courier New',monospace; font-weight:bold;">${formatDevise(ligne.valeur)}</td>
@@ -511,6 +667,11 @@ function afficherActifs(actifs) {
             ${!portfolioJoueurCible ? `<td><button class="btn-vente" style="padding:4px 12px; font-size:0.85em;" onclick="vendreDepuisPortefeuille('${ligne.symbole}', ${ligne.prix_unitaire})">Vendre</button></td>` : '<td></td>'}`;
         tbody.appendChild(tr);
     });
+    if (actifs.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="7" style="text-align:center; padding:20px; color:var(--text-muted);">Aucune position ouverte</td>`;
+        tbody.appendChild(tr);
+    }
 }
 
 function chargerPortefeuille() {
@@ -693,10 +854,31 @@ function cancelSyncClock(canvasId) {
 function voirDetail(symbol) {
     symboleActuel = symbol;
     graphiquePremierChargement = true;
-    document.getElementById("detail-titre").innerText = symbol;
+    document.getElementById("detail-titre").innerText = labelActif(symbol);
     document.getElementById("trade-message").innerText = "";
     document.getElementById("modal-trade-bg").classList.remove("open");
-    document.getElementById("panneau-detail-bg").classList.add("open");
+
+    const bg    = document.getElementById("panneau-detail-bg");
+    const panel = document.getElementById("panneau-detail");
+
+    lockScroll();
+
+    if (window.innerWidth <= 700) {
+        bg.style.opacity    = '0';
+        bg.style.transition = 'none';
+        panel.style.transition = 'none';
+        panel.style.transform  = 'translateY(110%)';
+        bg.classList.add("open");
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            bg.style.transition    = 'opacity 0.30s ease';
+            bg.style.opacity       = '1';
+            panel.style.transition = 'transform 0.30s cubic-bezier(0.4, 0, 0.2, 1)';
+            panel.style.transform  = 'translateY(0)';
+        }));
+    } else {
+        bg.classList.add("open");
+    }
+
     chargerGraphique(symboleActuel, periodeActuelle);
     chargerStats(symbol);
     sauvegarderUI();
@@ -736,10 +918,30 @@ function chargerStats(symbol) {
 }
 
 function fermerDetail() {
-    document.getElementById("panneau-detail-bg").classList.remove("open");
-    if (graphiqueActif) { graphiqueActif.destroy(); graphiqueActif = null; }
-    symboleActuel = "";
-    sauvegarderUI();
+    const bg    = document.getElementById("panneau-detail-bg");
+    const panel = document.getElementById("panneau-detail");
+
+    const cleanup = () => {
+        bg.classList.remove("open");
+        panel.style.transform  = '';
+        panel.style.transition = '';
+        bg.style.opacity    = '';
+        bg.style.transition = '';
+        unlockScroll();
+        if (graphiqueActif) { graphiqueActif.destroy(); graphiqueActif = null; }
+        symboleActuel = "";
+        sauvegarderUI();
+    };
+
+    if (window.innerWidth <= 700) {
+        bg.style.transition    = 'opacity 0.26s ease';
+        bg.style.opacity       = '0';
+        panel.style.transition = 'transform 0.26s cubic-bezier(0.4, 0, 0.2, 1)';
+        panel.style.transform  = 'translateY(110%)';
+        setTimeout(cleanup, 280);
+    } else {
+        cleanup();
+    }
 }
 
 function fermerDetailOverlay(event) {
@@ -758,59 +960,85 @@ function getCacheKey(symbol, periode) { return `${symbol}_${periode}`; }
 
 function chargerGraphique(symbol, periode, prevPeriode) {
     const key = getCacheKey(symbol, periode);
-    const wrapper = document.getElementById("graphique-wrapper");
     const isTransition = !!prevPeriode && prevPeriode !== periode;
     const zoomIn = isTransition &&
         PERIODE_ORDER.indexOf(periode) < PERIODE_ORDER.indexOf(prevPeriode);
 
-    const fetchEtRendre = () => {
+    // Fraction visible utilisée pour les animations (~ratio temporel, borné pour le visuel)
+    const zoomRatio = (from, to) =>
+        Math.max(0.18, Math.min(0.65, PERIODE_SEC[to] / PERIODE_SEC[from]));
+
+    if (!isTransition) {
         fetch(`/api/historique?symbole=${symbol}&periode=${periode}`)
-            .then(res => res.json())
+            .then(r => r.json())
             .then(data => {
-                cacheGraphique[key] = {
-                    labels: data.map(d => d.time),
-                    prices: data.map(d => d.price)
-                };
+                cacheGraphique[key] = { labels: data.map(d => d.time), prices: data.map(d => d.price) };
                 const c = cacheGraphique[key];
                 if (!c.prices.length) return;
-
-                const dernierPrix = c.prices[c.prices.length - 1];
-                document.getElementById("detail-prix").innerText = formatDevise(dernierPrix);
-                prixActuel = dernierPrix;
-
-                const avecAnimationChart = graphiquePremierChargement && !isTransition;
+                prixActuel = c.prices[c.prices.length - 1];
+                document.getElementById("detail-prix").innerText = formatDevise(prixActuel);
+                const withAnim = graphiquePremierChargement;
                 graphiquePremierChargement = false;
-                dessinerGraphique(c.labels, c.prices, avecAnimationChart);
+                dessinerGraphique(c.labels, c.prices, withAnim);
                 majPreviewTrade();
-
-                if (isTransition && wrapper) {
-                    const fromX = zoomIn ? "16px" : "-16px";
-                    wrapper.style.transition = "none";
-                    wrapper.style.transform = `translateX(${fromX}) scaleX(0.96)`;
-                    wrapper.style.opacity = "0";
-                    requestAnimationFrame(() => requestAnimationFrame(() => {
-                        wrapper.style.transition =
-                            "transform 0.28s cubic-bezier(0.25,0.46,0.45,0.94), opacity 0.28s ease-out";
-                        wrapper.style.transform = "none";
-                        wrapper.style.opacity = "1";
-                    }));
-                }
             })
             .catch(err => console.error("Erreur graphique:", err));
-    };
+        return;
+    }
 
-    if (isTransition && wrapper) {
-        const toX = zoomIn ? "-16px" : "16px";
-        wrapper.style.transition = "transform 0.15s ease-in, opacity 0.15s ease-in";
-        wrapper.style.transform = `translateX(${toX}) scaleX(0.96)`;
-        wrapper.style.opacity = "0";
-        setTimeout(fetchEtRendre, 150);
+    if (zoomIn) {
+        // ── Zoom in : animation exit sur l'ancien chart + fetch en parallèle ──
+        const N = graphiqueActif ? graphiqueActif.data.labels.length : 0;
+        const targetMin = N > 0 ? Math.floor(N * (1 - zoomRatio(prevPeriode, periode))) : 0;
+
+        let animDone = false, fetchData = null;
+        const swap = () => {
+            if (!animDone || !fetchData) return;
+            graphiquePremierChargement = false;
+            dessinerGraphique(fetchData.labels, fetchData.prices, false);
+            prixActuel = fetchData.prices[fetchData.prices.length - 1];
+            document.getElementById("detail-prix").innerText = formatDevise(prixActuel);
+            majPreviewTrade();
+        };
+
+        if (graphiqueActif && N > 0) {
+            animerAxe(graphiqueActif, 0, targetMin, 375, 'inout', () => { animDone = true; swap(); });
+        } else {
+            animDone = true;
+        }
+
+        fetch(`/api/historique?symbole=${symbol}&periode=${periode}`)
+            .then(r => r.json())
+            .then(data => {
+                cacheGraphique[key] = { labels: data.map(d => d.time), prices: data.map(d => d.price) };
+                const c = cacheGraphique[key];
+                if (c.prices.length) { fetchData = c; swap(); }
+            })
+            .catch(err => console.error("Erreur graphique:", err));
+
     } else {
-        fetchEtRendre();
+        // ── Zoom out : fetch, puis animation enter (dezoom depuis la droite) ──
+        fetch(`/api/historique?symbole=${symbol}&periode=${periode}`)
+            .then(r => r.json())
+            .then(data => {
+                cacheGraphique[key] = { labels: data.map(d => d.time), prices: data.map(d => d.price) };
+                const c = cacheGraphique[key];
+                if (!c.prices.length) return;
+                prixActuel = c.prices[c.prices.length - 1];
+                document.getElementById("detail-prix").innerText = formatDevise(prixActuel);
+                graphiquePremierChargement = false;
+                // Démarre zoomed-in sur la droite (même portion que l'ancienne fenêtre)
+                const startMin = Math.floor(c.labels.length * (1 - zoomRatio(periode, prevPeriode)));
+                dessinerGraphique(c.labels, c.prices, false, startMin > 0 ? startMin : undefined);
+                if (graphiqueActif && startMin > 0)
+                    animerAxe(graphiqueActif, startMin, 0, 425, 'in', null);
+                majPreviewTrade();
+            })
+            .catch(err => console.error("Erreur graphique:", err));
     }
 }
 
-function dessinerGraphique(labels, prices, animate = false) {
+function dessinerGraphique(labels, prices, animate = false, xMinInitial = undefined) {
     const ctx = document.getElementById("graphique-actif").getContext("2d");
     if (graphiqueActif) graphiqueActif.destroy();
 
@@ -844,7 +1072,7 @@ function dessinerGraphique(labels, prices, animate = false) {
             interaction: { mode: "index", intersect: false },
             plugins: { legend: { display: false } },
             scales: {
-                x: { grid: { display: false } },
+                x: { grid: { display: false }, ...(xMinInitial !== undefined ? { min: xMinInitial } : {}) },
                 y: { grace: "5%", grid: { color: gridColor, lineWidth: 0.5 } }
             }
         }
@@ -881,7 +1109,7 @@ function ouvrirModalTrade(action) {
     const msg = document.getElementById("trade-modal-msg");
 
     titre.innerText = action === "achat" ? "Acheter" : "Vendre";
-    document.getElementById("trade-modal-symbole").innerText = symboleActuel;
+    document.getElementById("trade-modal-symbole").innerText = labelActif(symboleActuel);
     btn.className = "trade-modal-confirm " + (action === "achat" ? "btn-achat" : "btn-vente");
     btn.innerText = action === "achat" ? "Confirmer l'achat" : "Confirmer la vente";
 
@@ -895,16 +1123,53 @@ function ouvrirModalTrade(action) {
     document.getElementById("prev-frais").innerText = "—";
     document.getElementById("prev-total").innerText = "—";
 
-    bg.classList.add("open");
+    lockScroll();
+
+    const modal = document.getElementById("trade-modal");
+    if (window.innerWidth <= 700) {
+        bg.style.opacity    = '0';
+        bg.style.transition = 'none';
+        modal.style.transition = 'none';
+        modal.style.transform  = 'translateY(110%)';
+        bg.classList.add("open");
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            bg.style.transition    = 'opacity 0.30s ease';
+            bg.style.opacity       = '1';
+            modal.style.transition = 'transform 0.30s cubic-bezier(0.4, 0, 0.2, 1)';
+            modal.style.transform  = 'translateY(0)';
+        }));
+    } else {
+        bg.classList.add("open");
+    }
     setTimeout(() => qteInput.focus(), 50);
     sauvegarderUI();
 }
 
 function fermerModalTrade(event) {
     if (event && event.target !== document.getElementById("modal-trade-bg")) return;
-    document.getElementById("modal-trade-bg").classList.remove("open");
-    tradeActionCourante = null;
-    sauvegarderUI();
+    const bg    = document.getElementById("modal-trade-bg");
+    const modal = document.getElementById("trade-modal");
+
+    const cleanup = () => {
+        bg.classList.remove("open");
+        modal.style.transform  = '';
+        modal.style.transition = '';
+        bg.style.opacity    = '';
+        bg.style.transition = '';
+        tradeActionCourante = null;
+        unlockScroll();
+        sauvegarderUI();
+    };
+
+    if (window.innerWidth <= 700) {
+        bg.style.transition    = 'opacity 0.26s ease';
+        bg.style.opacity       = '0';
+        modal.style.transition = 'transform 0.26s cubic-bezier(0.4, 0, 0.2, 1)';
+        modal.style.transform  = 'translateY(110%)';
+        setTimeout(cleanup, 280);
+    } else {
+        cleanup();
+    }
 }
 
 function majPreviewTrade() {

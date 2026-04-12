@@ -1,5 +1,5 @@
 # Variables pour faciliter les modifications futures
-CXX = g++
+CXX = ccache g++
 CXXFLAGS = -w
 LIBS = -lsqlite3 -lpthread -lssl -lcrypto
 TARGET = serveur

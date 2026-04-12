@@ -46,7 +46,9 @@
     --propos-card-bg: #ffffff;
     --propos-card-border: #eee;
     --separator-line: #ddd;
-    --section-sep-color: #555;
+    --section-sep-color: #2a2a2a;
+    --perf-card-bg:    #eef3fc;
+    --perf-card-border:#c5d8f8;
     --overlay-bg:     rgba(0,0,0,0.55);
 }
 
@@ -98,7 +100,9 @@ body.dark {
     --propos-card-bg: #2b2e48;
     --propos-card-border: #3d4068;
     --separator-line: #3d4068;
-    --section-sep-color: #9fa3ba;
+    --section-sep-color: #d0d3e8;
+    --perf-card-bg:    rgba(79,142,247,0.07);
+    --perf-card-border:rgba(79,142,247,0.28);
     --overlay-bg:     rgba(0,0,0,0.65);
 }
 
@@ -112,7 +116,7 @@ body {
     align-items: center;
     min-height: 100vh;
     margin: 0;
-    padding: 15vh 0 60px;
+    padding: clamp(0px, calc(22.82vw - 276px), 15vh) 0 60px;
     box-sizing: border-box;
     transition: background-color 0.3s, color 0.3s;
 }
@@ -274,7 +278,41 @@ body.dark .dark-toggle-thumb { left: 19px; }
 .section-separator {
     display: flex; align-items: center; gap: 12px;
     margin: 48px 0 16px; color: var(--section-sep-color);
-    font-size: 0.78em; text-transform: uppercase; letter-spacing: 1.5px;
+    font-size: 0.88em; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px;
+}
+/* Espacement uniforme entre sections dans le portefeuille */
+#tab-portefeuille .market-header,
+#tab-portefeuille .joueur-profil-card,
+#tab-portefeuille .table-scroll { margin-bottom: 0; }
+
+/* ── Card Performances journalières ─────────────────────────────────────── */
+.perf-journalieres-card {
+    background: var(--perf-card-bg);
+    border: 1px solid var(--perf-card-border);
+    border-radius: 12px;
+    padding: 0 22px 20px;
+    margin-top: 48px;
+}
+.perf-journalieres-card .section-separator {
+    margin-top: 18px;
+    margin-bottom: 10px;
+}
+.perf-journalieres-card .section-separator::before,
+.perf-journalieres-card .section-separator::after { display: none; }
+
+/* ── Carte performances journalières ─────────────────────────────────────── */
+.perf-journalieres-card {
+    background: var(--perf-card-bg);
+    border: 1px solid var(--perf-card-border);
+    border-left: 3px solid var(--accent);
+    border-radius: 10px;
+    padding: 0 20px 20px;
+}
+.perf-journalieres-card .section-separator {
+    margin-top: 20px;
+}
+.perf-journalieres-card .table-scroll {
+    margin-bottom: 0;
 }
 .section-separator::before, .section-separator::after { content: ''; flex: 1; height: 1px; background: var(--separator-line); }
 .section-separator::before { flex: 0 0 0px; }
@@ -327,6 +365,38 @@ body.dark .dark-toggle-thumb { left: 19px; }
     box-shadow: 0 0 8px rgba(231,76,60,0.2);
 }
 
+/* ── Nav sticky flottante ─────────────────────────────────────────────────── */
+.game-nav-sticky {
+    position: fixed;
+    top: 0;
+    left: 50%;
+    width: 1150px;
+    max-width: 95vw;
+    transform: translateX(-50%) translateY(-110%);
+    z-index: 500;
+    margin-bottom: 0;
+    padding: 15px 2rem;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+}
+.game-nav-sticky.nav-visible {
+    transform: translateX(-50%) translateY(0);
+}
+@media (max-width: 700px) {
+    .game-nav.game-nav-sticky {
+        left: 0;
+        width: 100%;
+        max-width: 100%;
+        transform: translateY(-110%);
+        box-sizing: border-box;
+        padding: 5px calc(1rem + 5px);
+        transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .game-nav.game-nav-sticky.nav-visible {
+        transform: translateY(0);
+    }
+}
+
 /* ── Barre de recherche marché ───────────────────────────────────────────── */
 .market-toolbar {
     display: flex; align-items: center; gap: 12px;
@@ -341,6 +411,68 @@ body.dark .dark-toggle-thumb { left: 19px; }
 }
 .market-search:focus { outline: none; border-color: var(--accent); }
 .market-count { font-size: 0.82em; color: var(--text-muted); }
+
+/* ── Toggle symbole / nom d'actif ────────────────────────────────────────── */
+.actif-display-toggle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    background: var(--bg-card3);
+    border: 1.5px solid var(--border);
+    border-radius: 999px;
+    padding: 3px;
+    font-size: 0.73em;
+    font-weight: 700;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    cursor: pointer;
+    user-select: none;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.07);
+    transition: border-color 0.2s;
+}
+.actif-display-toggle:hover { border-color: var(--accent); }
+
+.adt-thumb {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    left: 3px;
+    width: calc(50% - 3px);
+    background: linear-gradient(135deg, var(--accent) 0%, #4da3ff 100%);
+    border-radius: 999px;
+    transition: transform 0.44s cubic-bezier(0.34, 1.56, 0.64, 1);
+    box-shadow: 0 2px 10px rgba(24, 119, 242, 0.38), 0 1px 3px rgba(0,0,0,0.18);
+    pointer-events: none;
+}
+.actif-display-toggle.nom-actif .adt-thumb {
+    transform: translateX(100%);
+}
+
+.actif-display-toggle span {
+    position: relative;
+    z-index: 1;
+    flex: 1;
+    text-align: center;
+    padding: 4px 13px;
+    transition: color 0.18s ease;
+    pointer-events: none;
+    color: var(--text-muted);
+}
+.actif-display-toggle:not(.nom-actif) .toggle-sym-btn,
+.actif-display-toggle.nom-actif     .toggle-nom-btn {
+    color: #fff;
+}
+
+body.dark .adt-thumb {
+    box-shadow: 0 2px 16px rgba(77, 163, 255, 0.55), 0 1px 4px rgba(0,0,0,0.35);
+}
+
+.actif-toggle-bar {
+    display: flex;
+    justify-content: flex-end;
+    margin: 8px 0 6px;
+}
 
 /* ── Tableau marché ───────────────────────────────────────────────────────── */
 .market-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
@@ -419,6 +551,38 @@ body.dark .dark-toggle-thumb { left: 19px; }
 
 .btn-fermer { background: none; border: none; color: var(--text-muted); font-size: 1.5em; padding: 0; box-shadow: none; }
 .btn-fermer:hover { background: none; color: var(--red); transform: scale(1.1); }
+
+/* ── Drag handle bottom sheet (mobile uniquement) ────────────────────────── */
+.detail-drag-handle,
+.trade-drag-handle {
+    display: none;
+    justify-content: center;
+    align-items: center;
+    height: 24px;
+    margin-bottom: 10px;
+    cursor: pointer;
+}
+.detail-drag-handle::before,
+.detail-drag-handle::after,
+.trade-drag-handle::before,
+.trade-drag-handle::after {
+    content: '';
+    display: block;
+    width: 12px;
+    height: 2px;
+    background: var(--text-muted);
+    border-radius: 1px;
+}
+.detail-drag-handle::before,
+.trade-drag-handle::before {
+    transform: rotate(40deg);
+    margin-right: -1.5px;
+}
+.detail-drag-handle::after,
+.trade-drag-handle::after {
+    transform: rotate(-40deg);
+    margin-left: -1.5px;
+}
 
 .prix-gros { font-size: 2.5em; font-family: 'Courier New', monospace; font-weight: bold; color: var(--green); margin: 10px 0; }
 
@@ -684,8 +848,8 @@ body.dark .dark-toggle-thumb { left: 19px; }
     #trades-history-body td:nth-child(5) { display: none; }
 
     .market-table th, .market-table td {
-        padding: 13px 10px;
-        font-size: 0.87em;
+        padding: 11px 7px;
+        font-size: 0.78em;
     }
     /* Marché uniquement : forcer le tableau dans sa largeur */
     #tab-marche .market-table {
@@ -735,12 +899,24 @@ body.dark .dark-toggle-thumb { left: 19px; }
         max-height: 92svh;
         border-radius: 16px 16px 0 0;
         padding: 20px 16px;
+        overflow-x: hidden;
     }
+    .detail-drag-handle { display: flex; }
+    .btn-fermer { display: none; }
     .stats-grid-detail {
         grid-template-columns: 1fr 1fr;
     }
     .prix-gros {
         font-size: 2em;
+    }
+    .timeframe-selector {
+        flex-wrap: wrap;
+        gap: 4px;
+        justify-content: center;
+    }
+    .btn-time {
+        padding: 6px 9px;
+        font-size: 0.78em;
     }
 
     /* ── Boutons achat/vente : côte à côte, tap-friendly ───────────────── */
@@ -755,14 +931,20 @@ body.dark .dark-toggle-thumb { left: 19px; }
         font-size: 1em;
     }
 
-    /* ── Modale trade : pleine largeur ──────────────────────────────────── */
+    /* ── Modale trade : bottom sheet ────────────────────────────────────── */
+    .trade-modal-bg {
+        align-items: flex-end;
+    }
     .trade-modal {
-        width: 92%;
-        max-width: 92%;
+        width: 100%;
+        max-width: 100%;
         box-sizing: border-box;
         padding: 20px 16px;
-        border-radius: 12px;
+        border-radius: 16px 16px 0 0;
+        overflow-x: hidden;
     }
+    .trade-drag-handle { display: flex; }
+    .trade-modal-close { display: none; }
 
     /* ── À propos : empiler ─────────────────────────────────────────────── */
     .propos-grid {

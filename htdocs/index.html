@@ -44,12 +44,25 @@
     </div>
 
     <div id="zone-jeu" style="display: none;">
+        <nav class="game-nav game-nav-sticky" id="game-nav-sticky">
+            <button data-tab="marche" onclick="switchTab('marche')">Marché</button>
+            <button data-tab="classement" onclick="switchTab('classement')">Classement</button>
+            <button data-tab="portefeuille" onclick="portfolioJoueurCible=null; switchTab('portefeuille')">Portefeuille</button>
+            <button data-tab="propos" onclick="switchTab('propos')">Infos</button>
+            <button class="btn-deconnexion" onclick="seDeconnecter()">Déconnexion</button>
+            <div class="game-nav-right">
+                <label class="dark-toggle" onclick="toggleDarkMode()">
+                    <span>🌙</span>
+                    <div class="dark-toggle-track"><div class="dark-toggle-thumb"></div></div>
+                </label>
+            </div>
+        </nav>
         <nav class="game-nav">
             <button data-tab="marche" onclick="switchTab('marche')">Marché</button>
             <button data-tab="classement" onclick="switchTab('classement')">Classement</button>
             <button data-tab="portefeuille" onclick="portfolioJoueurCible=null; switchTab('portefeuille')">Portefeuille</button>
-            <button data-tab="propos" onclick="switchTab('propos')">A propos</button>
-            <button class="btn-deconnexion" onclick="seDeconnecter()">Se déconnecter</button>
+            <button data-tab="propos" onclick="switchTab('propos')">Infos</button>
+            <button class="btn-deconnexion" onclick="seDeconnecter()">Déconnexion</button>
             <div class="game-nav-right">
                 <label class="dark-toggle" onclick="toggleDarkMode()">
                     <span>🌙</span>
@@ -84,7 +97,7 @@
         <main id="tab-container">
             <section id="tab-marche" class="tab-content">
                 <div class="market-header">
-                    <h2>Cours en direct (Binance)</h2>
+                    <h2>Cours en direct</h2>
                     <div id="sync-status" class="sync-status">
                         <canvas id="sync-clock" width="28" height="28"></canvas>
                         <span id="sync-text" class="status-ok">Synchronisation</span>
@@ -96,6 +109,11 @@
                            placeholder="Rechercher un actif…"
                            oninput="filtreMarche=this.value.trim().toUpperCase(); afficherTableauMarche()">
                     <span id="market-count" class="market-count"></span>
+                    <div class="actif-display-toggle" onclick="setAffichageNom(!affichageNom)">
+                        <div class="adt-thumb"></div>
+                        <span class="toggle-sym-btn">Sym</span>
+                        <span class="toggle-nom-btn">Nom</span>
+                    </div>
                 </div>
 
                 <div class="trading-layout">
@@ -164,23 +182,32 @@
                         <span id="pj-pnltotal" class="joueur-profil-value">—</span>
                     </div>
                 </div>
-                <div class="section-separator">
-                    <span>Historique journalier</span>
-                </div>
-                <div class="table-scroll">
-                <table class="market-table" id="portfolio-history-table" style="margin-bottom:20px;">
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>PnL du jour</th>
-                            <th>Classement</th>
-                        </tr>
-                    </thead>
-                    <tbody id="portfolio-history-body"></tbody>
-                </table>
+                <div class="perf-journalieres-card">
+                    <div class="section-separator">
+                        <span>Performances journalières</span>
+                    </div>
+                    <div class="table-scroll">
+                    <table class="market-table" id="portfolio-history-table">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>PnL du jour</th>
+                                <th>Classement</th>
+                            </tr>
+                        </thead>
+                        <tbody id="portfolio-history-body"></tbody>
+                    </table>
+                    </div>
                 </div>
                 <div class="section-separator">
                     <span>Positions ouvertes</span>
+                </div>
+                <div class="actif-toggle-bar">
+                    <div class="actif-display-toggle" onclick="setAffichageNom(!affichageNom)">
+                        <div class="adt-thumb"></div>
+                        <span class="toggle-sym-btn">Sym</span>
+                        <span class="toggle-nom-btn">Nom</span>
+                    </div>
                 </div>
                 <div class="table-scroll">
                 <table class="market-table">
@@ -257,6 +284,7 @@
     <!-- ── Panneau détail graphique (overlay global) ────────────────────────── -->
     <div id="panneau-detail-bg" class="detail-overlay-bg" onclick="fermerDetailOverlay(event)">
         <div id="panneau-detail" class="detail-overlay-panel">
+            <div class="detail-drag-handle" onclick="fermerDetail()"></div>
             <div class="detail-header">
                 <h2 id="detail-titre" style="margin: 0;">Symbole</h2>
                 <button class="btn-fermer" onclick="fermerDetail()">✖</button>
@@ -296,7 +324,7 @@
                 <button id="btn-24h" class="btn-time active" onclick="changerFenetre('24h')">24H</button>
                 <button id="btn-7d"  class="btn-time" onclick="changerFenetre('7d')">7J</button>
                 <button id="btn-1m"  class="btn-time" onclick="changerFenetre('1m')">1M</button>
-                <button id="btn-3m"  class="btn-time" onclick="changerFenetre('3m')">3M</button>
+                <button id="btn-4m"  class="btn-time" onclick="changerFenetre('4m')">4M</button>
                 <button id="btn-1y"  class="btn-time" onclick="changerFenetre('1y')">1A</button>
                 <button id="btn-5y"  class="btn-time" onclick="changerFenetre('5y')">5A</button>
             </div>
@@ -313,7 +341,8 @@
 
     <!-- ── Modale achat / vente ─────────────────────────────────────────────── -->
     <div id="modal-trade-bg" class="trade-modal-bg" onclick="fermerModalTrade(event)">
-        <div class="trade-modal">
+        <div class="trade-modal" id="trade-modal">
+            <div class="trade-drag-handle" onclick="fermerModalTrade(null)"></div>
             <div class="trade-modal-header">
                 <span id="trade-modal-titre">Acheter</span> <span id="trade-modal-symbole" style="font-size:1.15em; font-weight:800; letter-spacing:0.5px;"></span>
                 <button class="trade-modal-close" onclick="fermerModalTrade(null)">✕</button>
