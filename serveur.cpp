@@ -92,6 +92,7 @@ std::mutex marcheMutex;
 static sqlite3* openDatabase() {
     sqlite3* db = nullptr;
     sqlite3_open("bourse.db", &db);
+    if (db) sqlite3_exec(db, "PRAGMA busy_timeout=5000;", nullptr, 0, nullptr);
     return db;
 }
 
@@ -188,7 +189,9 @@ static bool verifyPassword(const std::string& plain, const std::string& stored) 
     std::getline(ss, hashHex);
     if (saltHex.empty() || hashHex.empty()) return false;
 
-    int iterations = std::stoi(iterStr);
+    int iterations = 0;
+    try { iterations = std::stoi(iterStr); } catch (...) { return false; }
+    if (iterations <= 0) return false;
     auto salt      = fromHex(saltHex);
     auto expected  = fromHex(hashHex);
     const int HASH_LEN = 32;
@@ -415,47 +418,62 @@ static void genererHistoriqueSimule(sqlite3* db) {
 }
 
 // Rafraîchit variation_24h, open, high, low depuis l'historique
+// Optimisé : 2 requêtes GROUP BY au lieu de 3×N requêtes individuelles
 static void refreshStatsMarcheSimule() {
     sqlite3* db = openDatabase();
-    sqlite3_stmt* st;
-    for (const auto& sym : SIM_SYMBOLES) {
-        double prix_24h = 0.0, open_v = 0.0, high_v = 0.0, low_v = 0.0;
+    if (!db) return;
 
-        if (sqlite3_prepare_v2(db,
-            "SELECT prix FROM historique WHERE symbole = ? AND timestamp <= datetime('now','-24 hours') ORDER BY timestamp DESC LIMIT 1;",
-            -1, &st, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, sym.c_str(), -1, SQLITE_STATIC);
-            if (sqlite3_step(st) == SQLITE_ROW) prix_24h = sqlite3_column_double(st, 0);
+    struct StatsSym { double open = 0, high = 0, low = 0, prix24h = 0; };
+    std::map<std::string, StatsSym> results;
+
+    // 1. Prix d'il y a ~24h par symbole (pour calculer la variation)
+    {
+        sqlite3_stmt* st;
+        const char* sql =
+            "SELECT h.symbole, h.prix FROM historique h "
+            "INNER JOIN ("
+            "  SELECT symbole, MAX(id) AS max_id FROM historique "
+            "  WHERE timestamp <= datetime('now','-24 hours') GROUP BY symbole"
+            ") t ON h.id = t.max_id AND h.symbole = t.symbole;";
+        if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW)
+                results[(const char*)sqlite3_column_text(st, 0)].prix24h = sqlite3_column_double(st, 1);
         }
         sqlite3_finalize(st);
+    }
 
-        if (sqlite3_prepare_v2(db,
-            "SELECT prix FROM historique WHERE symbole = ? AND timestamp >= datetime('now','-24 hours') ORDER BY timestamp ASC LIMIT 1;",
-            -1, &st, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, sym.c_str(), -1, SQLITE_STATIC);
-            if (sqlite3_step(st) == SQLITE_ROW) open_v = sqlite3_column_double(st, 0);
-        }
-        sqlite3_finalize(st);
-
-        if (sqlite3_prepare_v2(db,
-            "SELECT MIN(prix), MAX(prix) FROM historique WHERE symbole = ? AND timestamp >= datetime('now','-24 hours');",
-            -1, &st, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, sym.c_str(), -1, SQLITE_STATIC);
-            if (sqlite3_step(st) == SQLITE_ROW) {
-                low_v  = sqlite3_column_double(st, 0);
-                high_v = sqlite3_column_double(st, 1);
+    // 2. Open (premier prix), High, Low sur les 24 dernières heures
+    {
+        sqlite3_stmt* st;
+        const char* sql =
+            "SELECT h.symbole, h.prix, stats.low_v, stats.high_v "
+            "FROM historique h "
+            "INNER JOIN ("
+            "  SELECT symbole, MIN(id) AS min_id, MIN(prix) AS low_v, MAX(prix) AS high_v "
+            "  FROM historique WHERE timestamp >= datetime('now','-24 hours') GROUP BY symbole"
+            ") stats ON h.id = stats.min_id AND h.symbole = stats.symbole;";
+        if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                auto& s = results[(const char*)sqlite3_column_text(st, 0)];
+                s.open  = sqlite3_column_double(st, 1);
+                s.low   = sqlite3_column_double(st, 2);
+                s.high  = sqlite3_column_double(st, 3);
             }
         }
         sqlite3_finalize(st);
-
-        std::lock_guard<std::mutex> lock(marcheMutex);
-        auto& a = marcheMondial[sym];
-        if (prix_24h > 0.0) a.variation_24h = (a.prix - prix_24h) / prix_24h * 100.0;
-        if (open_v  > 0.0) a.open = open_v;
-        if (high_v  > 0.0) a.high = high_v;
-        if (low_v   > 0.0) a.low  = low_v;
     }
+
     sqlite3_close(db);
+
+    // Appliquer en une seule prise de verrou
+    std::lock_guard<std::mutex> lock(marcheMutex);
+    for (auto& [sym, s] : results) {
+        auto& a = marcheMondial[sym];
+        if (s.open  > 0.0) a.open = s.open;
+        if (s.high  > 0.0) a.high = s.high;
+        if (s.low   > 0.0) a.low  = s.low;
+        if (s.prix24h > 0.0) a.variation_24h = (a.prix - s.prix24h) / s.prix24h * 100.0;
+    }
 }
 
 // Worker simulation : random walk toutes les 5s, refresh stats toutes les 60s
@@ -571,6 +589,35 @@ static double calculerValeurPortefeuille(sqlite3* db, int uid) {
     return valeur;
 }
 
+// Calcule le rang d'un joueur en 1 seule requête SQL (au lieu de N appels à calculerValeurPortefeuille)
+static int calculerRangActuel(sqlite3* db, int uid, double maValeur) {
+    // Snapshot des prix courants (verrou bref)
+    std::map<std::string, double> prix;
+    {
+        std::lock_guard<std::mutex> lock(marcheMutex);
+        for (auto& [sym, a] : marcheMondial) prix[sym] = a.prix;
+    }
+    // Chargement de tous les portefeuilles en une requête
+    std::map<int, double> valeurs;
+    sqlite3_stmt* st;
+    if (sqlite3_prepare_v2(db,
+        "SELECT user_id, symbole, quantite FROM portefeuilles WHERE quantite > 0;",
+        -1, &st, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            int oid  = sqlite3_column_int(st, 0);
+            std::string sym = (const char*)sqlite3_column_text(st, 1);
+            double qte = sqlite3_column_double(st, 2);
+            if (sym == "USD") valeurs[oid] += qte;
+            else if (prix.count(sym)) valeurs[oid] += qte * prix.at(sym);
+        }
+    }
+    sqlite3_finalize(st);
+    int rang = 1;
+    for (auto& [oid, val] : valeurs)
+        if (oid != uid && val > maValeur) rang++;
+    return rang;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -591,7 +638,13 @@ int main() {
         std::cout << "[INFO] TWELVEDATA_API_KEY non définie — mode simulation activé." << std::endl;
 
     sqlite3* db = openDatabase();
-    
+
+    // Optimisations SQLite globales (persistent dans le fichier pour WAL)
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;",       nullptr, 0, nullptr);
+    sqlite3_exec(db, "PRAGMA synchronous=NORMAL;",     nullptr, 0, nullptr);
+    sqlite3_exec(db, "PRAGMA cache_size=-8000;",       nullptr, 0, nullptr); // 8 MB
+    sqlite3_exec(db, "PRAGMA temp_store=MEMORY;",      nullptr, 0, nullptr);
+
     // Initialisation DB
     const char* initSql = R"(
         CREATE TABLE IF NOT EXISTS utilisateurs (
@@ -640,6 +693,9 @@ int main() {
     // Migrations (ignore errors if columns/tables already exist)
     sqlite3_exec(db, "ALTER TABLE portefeuilles ADD COLUMN prix_moyen REAL DEFAULT 0;", nullptr, 0, nullptr);
     sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS daily_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, date TEXT, pnl_day_pct REAL, rank INTEGER, FOREIGN KEY(user_id) REFERENCES utilisateurs(id), UNIQUE(user_id, date));", nullptr, 0, nullptr);
+    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_historique_sym_ts ON historique(symbole, timestamp);", nullptr, 0, nullptr);
+    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_trades_log_user ON trades_log(user_id);", nullptr, 0, nullptr);
+    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(username);", nullptr, 0, nullptr);
 
     // Charger l'état de la partie
     sqlite3_stmt* cfgStmt;
@@ -789,6 +845,18 @@ int main() {
             sqlite3_exec(db, "DELETE FROM user_sessions  WHERE expires_at <= datetime('now');", nullptr, 0, nullptr);
             sqlite3_exec(db, "DELETE FROM admin_sessions WHERE expires_at <= datetime('now');", nullptr, 0, nullptr);
             sqlite3_close(db);
+
+            // Nettoyage de la map anti-bruteforce pour éviter les fuites de mémoire (DoS)
+            {
+                std::lock_guard<std::mutex> lock(bruteforceMutex);
+                auto now = std::chrono::steady_clock::now();
+                for (auto it = bruteForceMap.begin(); it != bruteForceMap.end(); ) {
+                    if (now > it->second.blocked_until && 
+                        std::chrono::duration_cast<std::chrono::seconds>(now - it->second.first_attempt).count() > BF_WINDOW_SEC) {
+                        it = bruteForceMap.erase(it);
+                    } else ++it;
+                }
+            }
         }
     }).detach();
 
@@ -880,7 +948,7 @@ int main() {
 
     svr.Get("/api/check-session", [](const httplib::Request& req, httplib::Response& res) {
         std::string user = getCookieUser(req);
-        if (!user.empty()) res.set_content("{\"status\":\"connecte\",\"user\":\"" + user + "\"}", "application/json");
+        if (!user.empty()) res.set_content(json({{"status","connecte"},{"user",user}}).dump(), "application/json");
         else { res.status = 401; res.set_content("{\"erreur\":\"non connecte\"}", "application/json"); }
     });
 
@@ -932,14 +1000,34 @@ int main() {
     });
 
     svr.Post("/api/register", [](const httplib::Request& req, httplib::Response& res) {
+        // Rate limiting : même mécanisme que le login
+        if (isRateLimited(req.remote_addr)) {
+            res.status = 429;
+            res.set_content("{\"erreur\":\"Trop de tentatives. Réessayez dans 15 minutes.\"}", "application/json");
+            return;
+        }
+        recordFailedAttempt(req.remote_addr); // chaque tentative d'inscription compte
+
         std::string user = req.get_param_value("user");
         std::string pass = req.get_param_value("pass");
-        std::string tel  = req.get_param_value("tel"); // <-- Le nouveau champ !
+        std::string tel  = req.get_param_value("tel");
 
-        // On vérifie que tout est rempli
-        if (user.size() < 3 || pass.size() < 4 || tel.empty()) {
-            res.status = 400; 
-            res.set_content("{\"erreur\":\"Informations incomplètes ou trop courtes\"}", "application/json"); 
+        bool isUserValid = true;
+        for (char c : user) {
+            if (!std::isalnum(c) && c != '_' && c != '-') { isUserValid = false; break; }
+        }
+
+        bool isTelValid = true;
+        for (char c : tel) {
+            if (!std::isdigit(c) && c != '+' && c != ' ' && c != '-') { isTelValid = false; break; }
+        }
+
+        // Validation longueur (anti-flood / anti-DoS)
+        if (!isUserValid || !isTelValid || user.size() < 3 || user.size() > 30 ||
+            pass.size() < 4 || pass.size() > 100 ||
+            tel.empty()    || tel.size() > 20) {
+            res.status = 400;
+            res.set_content("{\"erreur\":\"Informations invalides (pseudo alphanumérique uniquement)\"}", "application/json");
             return;
         }
 
@@ -990,6 +1078,8 @@ int main() {
             }
 
             // 4. Si tout est OK : créer un token de session sécurisé (7 jours)
+            // Nettoyage des sessions expirées au passage (évite accumulation infinie)
+            sqlite3_exec(db, "DELETE FROM user_sessions WHERE expires_at <= datetime('now');", nullptr, 0, nullptr);
             std::string token = generateToken();
             sqlite3_stmt* stok;
             if (sqlite3_prepare_v2(db,
@@ -1079,7 +1169,7 @@ int main() {
             " ORDER BY 3 ASC;";
 
         static const char* SQL_7D =   // 7j     / 1h      = 168 pts
-            "SELECT AVG(prix), strftime('%d/%m %H:00', timestamp),"
+            "SELECT AVG(prix), strftime('%d/%m', timestamp),"
             " strftime('%Y-%m-%d %H:00:00', timestamp)"
             " FROM historique WHERE symbole = ?"
             " AND timestamp >= datetime('now', '-7 days')"
@@ -1088,7 +1178,7 @@ int main() {
 
         static const char* SQL_1M =   // 30j    / 4h      = 180 pts
             "SELECT AVG(prix),"
-            " strftime('%d/%m ', timestamp) || printf('%02d:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 4) * 4),"
+            " strftime('%d/%m', timestamp),"
             " strftime('%Y-%m-%d ', timestamp) || printf('%02d:00:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 4) * 4)"
             " FROM historique WHERE symbole = ?"
             " AND timestamp >= datetime('now', '-1 month')"
@@ -1097,7 +1187,7 @@ int main() {
 
         static const char* SQL_4M =   // 120j   / 16h     = ~180 pts
             "SELECT AVG(prix),"
-            " strftime('%d/%m ', timestamp) || printf('%02d:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 16) * 16),"
+            " strftime('%d/%m', timestamp),"
             " strftime('%Y-%m-%d ', timestamp) || printf('%02d:00:00', (CAST(strftime('%H', timestamp) AS INTEGER) / 16) * 16)"
             " FROM historique WHERE symbole = ?"
             " AND timestamp >= datetime('now', '-4 months')"
@@ -1105,7 +1195,7 @@ int main() {
             " ORDER BY 3 ASC;";
 
         static const char* SQL_1Y =   // 365j   / 2j      = ~182 pts
-            "SELECT AVG(prix), strftime('%d/%m', MIN(timestamp)),"
+            "SELECT AVG(prix), strftime('%m/%Y', MIN(timestamp)),"
             " strftime('%Y', timestamp) || printf('-%03d', (CAST(strftime('%j', timestamp) AS INTEGER) / 2) * 2)"
             " FROM historique WHERE symbole = ?"
             " AND timestamp >= datetime('now', '-1 year')"
@@ -1113,7 +1203,7 @@ int main() {
             " ORDER BY 3 ASC;";
 
         static const char* SQL_5Y =   // 5*365j / 10j     = ~182 pts
-            "SELECT AVG(prix), strftime('%d/%m', MIN(timestamp)),"
+            "SELECT AVG(prix), strftime('%m/%Y', MIN(timestamp)),"
             " strftime('%Y', timestamp) || printf('-%03d', (CAST(strftime('%j', timestamp) AS INTEGER) / 10) * 10)"
             " FROM historique WHERE symbole = ?"
             " AND timestamp >= datetime('now', '-5 years')"
@@ -1212,6 +1302,133 @@ int main() {
         res.set_content(j.dump(), "application/json");
     });
 
+    // GET /api/classement/chart
+    svr.Get("/api/classement/chart", [](const httplib::Request& req, httplib::Response& res) {
+        sqlite3* db = openDatabase();
+
+        struct UInfo { int uid; std::string username; double val; time_t t_start; };
+        std::vector<UInfo> topUsers;
+
+        sqlite3_stmt* stmtUsers;
+        if (sqlite3_prepare_v2(db, "SELECT id, username, CAST(strftime('%s', created_at) AS INTEGER) FROM utilisateurs;", -1, &stmtUsers, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmtUsers) == SQLITE_ROW) {
+                int uid = sqlite3_column_int(stmtUsers, 0);
+                std::string un = (const char*)sqlite3_column_text(stmtUsers, 1);
+                time_t ts = sqlite3_column_type(stmtUsers, 2) != SQLITE_NULL ? sqlite3_column_int64(stmtUsers, 2) : time(nullptr);
+                double val = calculerValeurPortefeuille(db, uid);
+                topUsers.push_back({uid, un, val, ts});
+            }
+        }
+        sqlite3_finalize(stmtUsers);
+
+        std::sort(topUsers.begin(), topUsers.end(), [](const UInfo& a, const UInfo& b) { return a.val > b.val; });
+        if (topUsers.size() > 10) topUsers.resize(10); // Limite au top 10 pour lisibilité
+
+        if (topUsers.empty()) {
+            sqlite3_close(db);
+            res.set_content("{\"labels\":[], \"datasets\":[]}", "application/json");
+            return;
+        }
+
+        time_t global_t_start = time(nullptr);
+        for (const auto& u : topUsers) {
+            if (u.t_start < global_t_start) global_t_start = u.t_start;
+        }
+        time_t t_now = time(nullptr);
+        if (global_t_start > t_now) global_t_start = t_now - 3600;
+        if (t_now - global_t_start < 3600) global_t_start = t_now - 3600;
+
+        int num_points = 100;
+        double step = std::max(60.0, (double)(t_now - global_t_start) / num_points);
+
+        std::vector<std::string> labels;
+        for (time_t t = global_t_start; t < t_now; t += (time_t)step) {
+            char buf[32]; strftime(buf, sizeof(buf), "%d/%m %H:%M", gmtime(&t));
+            labels.push_back(std::string(buf));
+        }
+        char buf[32]; strftime(buf, sizeof(buf), "%d/%m %H:%M", gmtime(&t_now));
+        labels.push_back(std::string(buf));
+
+        json datasets = json::array();
+        sqlite3_stmt* sp;
+        sqlite3_prepare_v2(db, "SELECT prix FROM historique WHERE symbole = ? AND timestamp <= datetime(?, 'unixepoch') ORDER BY timestamp DESC LIMIT 1;", -1, &sp, nullptr);
+
+        for (const auto& u : topUsers) {
+            struct Tr { time_t ts; std::string action; std::string sym; double qte; double val; };
+            std::vector<Tr> trades;
+            sqlite3_stmt* st;
+            if (sqlite3_prepare_v2(db, "SELECT action, symbole, quantite, valeur, CAST(strftime('%s', timestamp) AS INTEGER) FROM trades_log WHERE user_id = ? ORDER BY timestamp ASC;", -1, &st, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int(st, 1, u.uid);
+                while (sqlite3_step(st) == SQLITE_ROW) {
+                    trades.push_back({
+                        sqlite3_column_int64(st, 4),
+                        (const char*)sqlite3_column_text(st, 0),
+                        (const char*)sqlite3_column_text(st, 1),
+                        sqlite3_column_double(st, 2),
+                        sqlite3_column_double(st, 3)
+                    });
+                }
+            }
+            sqlite3_finalize(st);
+
+            json prices = json::array();
+            int trade_idx = 0;
+            double current_usd = 100000.0;
+            std::map<std::string, double> current_assets;
+
+            auto evaluate_portfolio = [&](time_t t) -> double {
+                if (t < u.t_start) return 100000.0;
+                while (trade_idx < (int)trades.size() && trades[trade_idx].ts <= t) {
+                    const auto& tr = trades[trade_idx];
+                    if (tr.action == "achat") {
+                        current_usd -= tr.val;
+                        current_assets[tr.sym] += tr.qte;
+                    } else {
+                        current_usd += tr.val;
+                        current_assets[tr.sym] -= tr.qte;
+                    }
+                    trade_idx++;
+                }
+                double val = current_usd;
+                for (const auto& [sym, qte] : current_assets) {
+                    if (qte <= 0.000001) continue;
+                    if (t_now - t < 60) {
+                        std::lock_guard<std::mutex> lock(marcheMutex);
+                        if (marcheMondial.count(sym)) { val += qte * marcheMondial[sym].prix; continue; }
+                    }
+                    sqlite3_bind_text(sp, 1, sym.c_str(), -1, SQLITE_STATIC);
+                    sqlite3_bind_int64(sp, 2, t);
+                    if (sqlite3_step(sp) == SQLITE_ROW) {
+                        val += qte * sqlite3_column_double(sp, 0);
+                    } else {
+                        std::lock_guard<std::mutex> lock(marcheMutex);
+                        if (marcheMondial.count(sym)) val += qte * marcheMondial[sym].prix;
+                    }
+                    sqlite3_reset(sp);
+                }
+                return val;
+            };
+
+            for (time_t t = global_t_start; t < t_now; t += (time_t)step) {
+                prices.push_back(evaluate_portfolio(t));
+            }
+            prices.push_back(evaluate_portfolio(t_now));
+
+            datasets.push_back({
+                {"username", u.username},
+                {"data", prices}
+            });
+        }
+        sqlite3_finalize(sp);
+        sqlite3_close(db);
+
+        json result = {
+            {"labels", labels},
+            {"datasets", datasets}
+        };
+        res.set_content(result.dump(), "application/json");
+    });
+
     // POST /api/trade
     svr.Post("/api/trade", [](const httplib::Request& req, httplib::Response& res) {
         std::string user = getCookieUser(req);
@@ -1229,6 +1446,11 @@ int main() {
 
         try { quantite = std::stod(req.get_param_value("quantite")); }
         catch (...) { res.status = 400; res.set_content("{\"erreur\":\"Quantite invalide\"}", "application/json"); return; }
+
+        // Protection contre la génération d'argent infini (Shorting/Negative input)
+        if (std::isnan(quantite) || std::isinf(quantite) || quantite <= 0.0) {
+            res.status = 400; res.set_content("{\"erreur\":\"La quantité doit être strictement positive\"}", "application/json"); return;
+        }
 
         for (char c : symbole) {
             if (!std::isalnum(c)&& c != '/') {
@@ -1259,7 +1481,8 @@ int main() {
         int uid = getUserId(db, user);
         if (uid == -1) { sqlite3_close(db); res.status = 404; return; }
 
-        sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, 0, nullptr);
+        // BEGIN IMMEDIATE empêche les race conditions en acquérant un verrou d'écriture instantané
+        sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", nullptr, 0, nullptr);
         std::string msg;
 
         auto rollback = [&]() {
@@ -1354,7 +1577,7 @@ int main() {
 
         sqlite3_exec(db, "COMMIT;", nullptr, 0, nullptr);
         sqlite3_close(db);
-        res.set_content("{\"status\":\"ok\",\"message\":\"" + msg + "\"}", "application/json");
+        res.set_content(json({{"status","ok"},{"message",msg}}).dump(), "application/json");
     });
 
     // GET /api/portefeuille
@@ -1500,16 +1723,8 @@ int main() {
 
         double pnlAujourdhui = snapActuel > 0 ? (valeurActuelle - snapActuel) / snapActuel * 100.0 : 0.0;
 
-        // Rang actuel
-        int rangActuel = 1;
-        sqlite3_stmt* sr;
-        if (sqlite3_prepare_v2(db, "SELECT id FROM utilisateurs;", -1, &sr, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(sr) == SQLITE_ROW) {
-                int other = sqlite3_column_int(sr, 0);
-                if (other != uid && calculerValeurPortefeuille(db, other) > valeurActuelle) rangActuel++;
-            }
-        }
-        sqlite3_finalize(sr);
+        // Rang actuel (1 requête SQL au lieu de N)
+        int rangActuel = calculerRangActuel(db, uid, valeurActuelle);
 
         time_t now = time(nullptr);
         char todayStr[16];
@@ -1537,6 +1752,107 @@ int main() {
 
         sqlite3_close(db);
         res.set_content(hist.dump(), "application/json");
+    });
+
+    // GET /api/portefeuille/chart — Historique complet du portefeuille
+    svr.Get("/api/portefeuille/chart", [](const httplib::Request& req, httplib::Response& res) {
+        std::string viewer = getCookieUser(req);
+        if (viewer.empty()) { res.status = 401; return; }
+
+        std::string target = req.has_param("username") ? req.get_param_value("username") : viewer;
+        if (target.empty()) target = viewer;
+
+        sqlite3* db = openDatabase();
+        int uid = getUserId(db, target);
+        if (uid == -1) { sqlite3_close(db); res.status = 404; return; }
+
+        time_t t_start = time(nullptr);
+        sqlite3_stmt* sc;
+        if (sqlite3_prepare_v2(db, "SELECT CAST(strftime('%s', created_at) AS INTEGER) FROM utilisateurs WHERE id = ?;", -1, &sc, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(sc, 1, uid);
+            if (sqlite3_step(sc) == SQLITE_ROW && sqlite3_column_type(sc, 0) != SQLITE_NULL) {
+                t_start = sqlite3_column_int64(sc, 0);
+            }
+        }
+        sqlite3_finalize(sc);
+
+        struct Tr { time_t ts; std::string action; std::string sym; double qte; double val; };
+        std::vector<Tr> trades;
+        sqlite3_stmt* st;
+        if (sqlite3_prepare_v2(db, "SELECT action, symbole, quantite, valeur, CAST(strftime('%s', timestamp) AS INTEGER) FROM trades_log WHERE user_id = ? ORDER BY timestamp ASC;", -1, &st, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(st, 1, uid);
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                trades.push_back({
+                    sqlite3_column_int64(st, 4),
+                    (const char*)sqlite3_column_text(st, 0),
+                    (const char*)sqlite3_column_text(st, 1),
+                    sqlite3_column_double(st, 2),
+                    sqlite3_column_double(st, 3)
+                });
+            }
+        }
+        sqlite3_finalize(st);
+
+        time_t t_now = time(nullptr);
+        if (t_start > t_now) t_start = t_now - 3600; // Fallback
+        int num_points = 100; // On génère 100 points de courbe fluides
+        double step = std::max(60.0, (double)(t_now - t_start) / num_points);
+
+        json chartData = json::array();
+        
+        sqlite3_stmt* sp;
+        sqlite3_prepare_v2(db, "SELECT prix FROM historique WHERE symbole = ? AND timestamp <= datetime(?, 'unixepoch') ORDER BY timestamp DESC LIMIT 1;", -1, &sp, nullptr);
+
+        int trade_idx = 0;
+        double current_usd = 100000.0;
+        std::map<std::string, double> current_assets;
+
+        auto evaluate_portfolio = [&](time_t t) -> double {
+            while (trade_idx < (int)trades.size() && trades[trade_idx].ts <= t) {
+                const auto& tr = trades[trade_idx];
+                if (tr.action == "achat") {
+                    current_usd -= tr.val;
+                    current_assets[tr.sym] += tr.qte;
+                } else {
+                    current_usd += tr.val;
+                    current_assets[tr.sym] -= tr.qte;
+                }
+                trade_idx++;
+            }
+            double val = current_usd;
+            for (const auto& [sym, qte] : current_assets) {
+                if (qte <= 0.000001) continue;
+                if (t_now - t < 60) {
+                    std::lock_guard<std::mutex> lock(marcheMutex);
+                    if (marcheMondial.count(sym)) { val += qte * marcheMondial[sym].prix; continue; }
+                }
+                sqlite3_bind_text(sp, 1, sym.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_int64(sp, 2, t);
+                if (sqlite3_step(sp) == SQLITE_ROW) {
+                    val += qte * sqlite3_column_double(sp, 0);
+                } else {
+                    std::lock_guard<std::mutex> lock(marcheMutex);
+                    if (marcheMondial.count(sym)) val += qte * marcheMondial[sym].prix;
+                }
+                sqlite3_reset(sp);
+            }
+            return val;
+        };
+
+        for (time_t t = t_start; t < t_now; t += (time_t)step) {
+            double pval = evaluate_portfolio(t);
+            char buf[32]; strftime(buf, sizeof(buf), "%d/%m %H:%M", gmtime(&t));
+            chartData.push_back({ {"time", std::string(buf)}, {"price", pval} });
+        }
+        
+        double final_val = evaluate_portfolio(t_now);
+        char buf[32]; strftime(buf, sizeof(buf), "%d/%m %H:%M", gmtime(&t_now));
+        chartData.push_back({ {"time", std::string(buf)}, {"price", final_val} });
+
+        sqlite3_finalize(sp);
+        sqlite3_close(db);
+
+        res.set_content(chartData.dump(), "application/json");
     });
 
     // GET /api/portefeuille/joueur?username=X  (vue publique du portefeuille d'un joueur)
@@ -1612,16 +1928,8 @@ int main() {
 
         double pnlAujourdhui = snapActuel > 0 ? (valeurTotale - snapActuel) / snapActuel * 100.0 : 0.0;
 
-        // Rang actuel
-        int rangActuel = 1;
-        sqlite3_stmt* sr;
-        if (sqlite3_prepare_v2(db, "SELECT id FROM utilisateurs;", -1, &sr, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(sr) == SQLITE_ROW) {
-                int other = sqlite3_column_int(sr, 0);
-                if (other != uid && calculerValeurPortefeuille(db, other) > valeurTotale) rangActuel++;
-            }
-        }
-        sqlite3_finalize(sr);
+        // Rang actuel (1 requête SQL au lieu de N)
+        int rangActuel = calculerRangActuel(db, uid, valeurTotale);
 
         time_t now = time(nullptr);
         char todayStr[16];
@@ -1875,9 +2183,15 @@ int main() {
     // 🛡️ CORRIGÉ : Faille d'injection SQL supprimée !
     svr.Post("/api/admin/set-balance", [&isAdmin](const httplib::Request& req, httplib::Response& res) {
         if (!isAdmin(req)) { res.status = 401; return; }
-        int uid = std::stoi(req.get_param_value("user_id"));
-        double amount = std::stod(req.get_param_value("amount"));
+        int uid; double amount;
+        try { uid = std::stoi(req.get_param_value("user_id")); amount = std::stod(req.get_param_value("amount")); }
+        catch (...) { res.status = 400; res.set_content("{\"erreur\":\"Parametres invalides\"}", "application/json"); return; }
         
+        if (std::isnan(amount) || std::isinf(amount) || amount < 0.0) {
+            res.status = 400; res.set_content("{\"erreur\":\"Montant invalide\"}", "application/json"); 
+            return;
+        }
+
         sqlite3* db = openDatabase();
         sqlite3_stmt* stmt;
         if (sqlite3_prepare_v2(db, "INSERT INTO portefeuilles (user_id, symbole, quantite) VALUES (?, 'USD', ?) ON CONFLICT(user_id, symbole) DO UPDATE SET quantite = excluded.quantite;", -1, &stmt, nullptr) == SQLITE_OK) {
@@ -1893,7 +2207,9 @@ int main() {
     // 🛡️ CORRIGÉ : Faille d'injection SQL supprimée !
     svr.Post("/api/admin/reset-user", [&isAdmin](const httplib::Request& req, httplib::Response& res) {
         if (!isAdmin(req)) { res.status = 401; return; }
-        int uid = std::stoi(req.get_param_value("user_id"));
+        int uid;
+        try { uid = std::stoi(req.get_param_value("user_id")); }
+        catch (...) { res.status = 400; res.set_content("{\"erreur\":\"Parametres invalides\"}", "application/json"); return; }
         
         sqlite3* db = openDatabase();
         sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, 0, nullptr);
@@ -1925,7 +2241,9 @@ int main() {
     
     svr.Post("/api/admin/delete-user", [&isAdmin](const httplib::Request& req, httplib::Response& res) {
         if (!isAdmin(req)) { res.status = 401; return; }
-        int uid = std::stoi(req.get_param_value("user_id"));
+        int uid;
+        try { uid = std::stoi(req.get_param_value("user_id")); }
+        catch (...) { res.status = 400; res.set_content("{\"erreur\":\"Parametres invalides\"}", "application/json"); return; }
         
         sqlite3* db = openDatabase();
         sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, 0, nullptr);
@@ -1976,7 +2294,9 @@ int main() {
     // 🛡️ CORRIGÉ : Faille d'injection SQL supprimée !
     svr.Post("/api/admin/delete-trade", [&isAdmin](const httplib::Request& req, httplib::Response& res) {
         if (!isAdmin(req)) { res.status = 401; return; }
-        int tid = std::stoi(req.get_param_value("trade_id"));
+        int tid;
+        try { tid = std::stoi(req.get_param_value("trade_id")); }
+        catch (...) { res.status = 400; res.set_content("{\"erreur\":\"Parametres invalides\"}", "application/json"); return; }
         
         sqlite3* db = openDatabase();
         sqlite3_stmt* st;
@@ -2067,6 +2387,11 @@ int main() {
         std::string symbole = req.get_param_value("symbole");
         for (auto & c: symbole) c = toupper(c);
 
+        if (std::isnan(quantite) || std::isinf(quantite) || quantite < 0.0) {
+            res.status = 400; res.set_content("{\"erreur\":\"Quantité invalide\"}", "application/json"); 
+            return;
+        }
+
         sqlite3* db = openDatabase();
         
         if (quantite <= 0.0) {
@@ -2099,8 +2424,9 @@ int main() {
     svr.Get("/api/admin/user-portfolio", [&isAdmin](const httplib::Request& req, httplib::Response& res) {
         if (!isAdmin(req)) { res.status = 401; return; }
         if (!req.has_param("user_id")) { res.status = 400; return; }
-        
-        int uid = std::stoi(req.get_param_value("user_id"));
+        int uid;
+        try { uid = std::stoi(req.get_param_value("user_id")); }
+        catch (...) { res.status = 400; res.set_content("{\"erreur\":\"Parametres invalides\"}", "application/json"); return; }
         sqlite3* db = openDatabase();
         json j = json::array();
         

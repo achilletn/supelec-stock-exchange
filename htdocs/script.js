@@ -55,11 +55,19 @@ let utilisateurActuel = "";
 let masterTickInterval = null;
 let cacheClassement = {};
 let graphiqueActif = null;
+let portfolioChart = null;
+let classementChart = null;
+let affichageClassementGraphique = false;
+let graphiqueLabels = [];   // labels temps courants du graphique (pour ticks.callback)
+let classementLabels = [];  // labels temps courants pour le classement
 let symboleActuel = "";
 let periodeActuelle = "24h";
 let tickCount = 0;
 let prixActuel = 0;
 let graphiquePremierChargement = true;
+
+let historiquePortefeuilleCharge = false;
+let historiqueTradesCharge = false;
 
 // ── Scroll lock robuste (position:fixed, iOS-safe) ───────────────────────────
 let _scrollLockCount = 0;
@@ -143,21 +151,43 @@ const PERIODE_SEC   = { '1h': 3600, '3h': 10800, '24h': 86400, '7d': 604800,
 
 let axeAnimRafId = null;
 
-// Anime x.min d'un chart Chart.js de fromMin → toMin sur `duration` ms
-function animerAxe(chart, fromMin, toMin, duration, easing, onComplete) {
+function calculerBornesY(prices) {
+    if (!prices || !prices.length) return { min: 0, max: 0 };
+    let yMin = Infinity, yMax = -Infinity;
+    for (let i = 0; i < prices.length; i++) {
+        const v = prices[i].y !== undefined ? prices[i].y : prices[i];
+        if (v < yMin) yMin = v;
+        if (v > yMax) yMax = v;
+    }
+    const yPad = (yMax - yMin) * 0.05 || yMax * 0.05 || 1;
+    return { min: yMin - yPad, max: yMax + yPad };
+}
+
+// Anime x.min et y.min/y.max d'un chart Chart.js en simultané
+function animerAxes(chart, from, to, duration, easing, onComplete) {
     if (axeAnimRafId) cancelAnimationFrame(axeAnimRafId);
+    const ds = chart.data.datasets[0];
+    const savedFill = ds.fill;
+    ds.fill = false;
+
     const start = performance.now();
     function step(now) {
         const t = Math.min((now - start) / duration, 1);
         const e = easing === 'in'  ? t * t * t
                 : easing === 'out' ? 1 - (1 - t) * (1 - t) * (1 - t)
                 :                    t < 0.5 ? 4*t*t*t : 1 - 4*(1-t)*(1-t)*(1-t);
-        chart.options.scales.x.min = Math.round(fromMin + (toMin - fromMin) * e);
+        
+        chart.options.scales.x.min = from.xMin + (to.xMin - from.xMin) * e;
+        chart.options.scales.y.min = from.yMin + (to.yMin - from.yMin) * e;
+        chart.options.scales.y.max = from.yMax + (to.yMax - from.yMax) * e;
         chart.update('none');
+        
         if (t < 1) {
             axeAnimRafId = requestAnimationFrame(step);
         } else {
             axeAnimRafId = null;
+            ds.fill = savedFill;
+            chart.update('none');
             if (onComplete) onComplete();
         }
     }
@@ -168,6 +198,28 @@ const tickHandlers = new Set();
 const syncClockHandles = {};
 const GRAPH_REFRESH_RATE = 1;
 const cacheGraphique = {};
+const CACHE_GRAPH_MAX = 40; // max entrées (50 actifs × 8 périodes potentiels → on garde les 40 dernières)
+function setCacheGraphique(key, val) {
+    cacheGraphique[key] = { val: val, ts: Date.now() };
+    const keys = Object.keys(cacheGraphique);
+    if (keys.length > CACHE_GRAPH_MAX) delete cacheGraphique[keys[0]];
+}
+
+function obtenirHistorique(symbol, periode) {
+    const key = getCacheKey(symbol, periode);
+    const cache = cacheGraphique[key];
+    // Utiliser le cache s'il a moins de 60 secondes (évite le spam réseau lors des clics rapides)
+    if (cache && (Date.now() - cache.ts < 60000)) {
+        return Promise.resolve(cache.val);
+    }
+    return fetch(`/api/historique?symbole=${symbol}&periode=${periode}`)
+        .then(r => r.json())
+        .then(data => {
+            const val = { labels: data.map(d => d.time), prices: data.map(d => d.price) };
+            setCacheGraphique(key, val);
+            return val;
+        });
+}
 
 let CYCLE_MS = 65000;
 let serverLastUpdateMs = 0;   // horodatage Unix (ms) de la dernière update serveur
@@ -184,13 +236,10 @@ function formatNum(n, decimals = 2) {
 }
 function formatDevise(n) { return formatNum(n) + '\u00A0$'; }
 
-function fetchSyncStatus() {
-    return fetch('/api/sync-status')
-        .then(r => r.json())
-        .then(d => {
-            CYCLE_MS = d.cycle_ms || 65000;
-            if (d.last_update_ms > 0) serverLastUpdateMs = d.last_update_ms;
-        });
+async function fetchSyncStatus() {
+    const d = await fetch('/api/sync-status').then(r => r.json());
+    CYCLE_MS = d.cycle_ms || 65000;
+    if (d.last_update_ms > 0) serverLastUpdateMs = d.last_update_ms;
 }
 
 function startMasterTick() {
@@ -336,7 +385,13 @@ function demarrerJeu() {
     document.getElementById("zone-jeu").style.display = "block";
 
     actualiserDashboard();
-    setInterval(actualiserDashboard, 30000);
+    // On synchronise le dashboard avec les mises à jour du marché (toutes les 65s) au lieu d'un interval asynchrone de 30s
+    tickHandlers.add(actualiserDashboard);
+
+    if (!window._clockInterval) window._clockInterval = setInterval(() => {
+        const el = document.getElementById("dash-clock");
+        if (el) el.innerText = new Date().toLocaleTimeString();
+    }, 1000);
     startMasterTick();
     initStickyNav();
     initDetailMobileDismiss();
@@ -413,7 +468,11 @@ function switchTab(tabName) {
 
     if (tabName === "marche") demarrerBoucleMarche();
     else if (tabName === "classement") demarrerBoucleClassement();
-    else if (tabName === "portefeuille") { demarrerBouclePortefeuille(); }
+    else if (tabName === "portefeuille") { 
+        historiquePortefeuilleCharge = false;
+        historiqueTradesCharge = false;
+        demarrerBouclePortefeuille(); 
+    }
 }
 
 function demarrerBoucleMarche() {
@@ -432,14 +491,20 @@ function arreterBoucleMarche() {
 let donneesMarche = [];
 let filtreMarche  = "";
 let triMarche     = { col: null, dir: 1 };
+let _marcheFetchCtrl = null;
 
 function actualiserTableauMarche() {
     const tbody = document.getElementById("market-body");
     if (!tbody) return;
 
-    fetch("/api/marche")
+    // Annuler le fetch précédent s'il est encore en vol (évite les race conditions)
+    if (_marcheFetchCtrl) _marcheFetchCtrl.abort();
+    _marcheFetchCtrl = new AbortController();
+
+    fetch("/api/marche", { signal: _marcheFetchCtrl.signal })
         .then(res => res.json())
         .then(data => {
+            _marcheFetchCtrl = null;
             if (data.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#f39c12;">Synchronisation en cours... 📡</td></tr>`;
                 return;
@@ -456,10 +521,38 @@ function actualiserTableauMarche() {
             }
 
             afficherTableauMarche();
+            majTicker(data);
         })
-        .catch(() => {
+        .catch(err => {
+            if (err.name === 'AbortError') return; // fetch annulé volontairement
             tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:red;">Erreur réseau ❌</td></tr>`;
         });
+}
+
+function majTicker(data) {
+    const container = document.getElementById("ticker-content");
+    if (!container || !data || data.length === 0) return;
+
+    // Trier par variation sur 24h
+    const sorted = [...data].sort((a, b) => b.variation_24h - a.variation_24h);
+    
+    // Récupérer les 4 meilleurs et les 4 pires
+    const top4 = sorted.slice(0, 4);
+    const bottom4 = sorted.slice(-4).reverse(); // Pire en premier
+
+    const buildItem = (item, isUp) => {
+        const sign = item.variation_24h > 0 ? '+' : '';
+        return `<div class="ticker-item ${isUp ? 'up' : 'down'}" onclick="switchTab('marche'); voirDetail('${item.symbol}')">
+                    <span>${labelActif(item.symbol)}</span>${sign}${item.variation_24h.toFixed(2)}%
+                </div>`;
+    };
+
+    let html = '';
+    top4.forEach(item => html += buildItem(item, true));
+    bottom4.forEach(item => html += buildItem(item, false));
+
+    // On duplique 4 fois pour être sûr de remplir l'écran et boucler de manière parfaitement invisible
+    container.innerHTML = html + html + html + html;
 }
 
 function afficherTableauMarche() {
@@ -505,7 +598,8 @@ function afficherTableauMarche() {
     // Rendu des lignes
     tbody.innerHTML = "";
     if (données.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#888;">Aucun actif trouvé pour « ${filtreMarche} »</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#888;">Aucun actif trouvé pour « <span id="no-result-text"></span> »</td></tr>`;
+        document.getElementById("no-result-text").textContent = filtreMarche; // .textContent bloque l'exécution HTML
         return;
     }
     données.forEach(action => {
@@ -538,6 +632,19 @@ function trierColonneMarche(col) {
         triMarche.dir = 1;
     }
     afficherTableauMarche();
+}
+
+function toggleAffichageClassement() {
+    affichageClassementGraphique = !affichageClassementGraphique;
+    const toggle = document.getElementById("toggle-classement-vue");
+    if (toggle) toggle.classList.toggle("nom-actif", affichageClassementGraphique);
+
+    document.getElementById("classement-table-container").style.display = affichageClassementGraphique ? "none" : "block";
+    document.getElementById("classement-graph-container").style.display = affichageClassementGraphique ? "block" : "none";
+
+    if (affichageClassementGraphique) {
+        chargerClassementGraphique();
+    }
 }
 
 function demarrerBoucleClassement() {
@@ -588,6 +695,10 @@ function chargerClassement() {
                     </td>`;
                 tbody.appendChild(tr);
             });
+        
+        if (affichageClassementGraphique) {
+            chargerClassementGraphique();
+        }
         });
 }
 
@@ -607,12 +718,13 @@ function appliquerDonneesDashboard(data) {
 
 function actualiserDashboard() {
     if (!utilisateurActuel) return;
+    // Optimisation : Si on est sur l'onglet classement, les données du dashboard 
+    // sont déjà incluses nativement dans la réponse de /api/classement. On évite le doublon !
+    const tabClassement = document.getElementById("tab-classement");
+    if (tabClassement && tabClassement.style.display === "block") return;
+
     fetch("/api/dashboard").then(res => res.json()).then(data => appliquerDonneesDashboard(data));
 }
-
-setInterval(() => {
-    document.getElementById("dash-clock").innerText = new Date().toLocaleTimeString();
-}, 1000);
 
 let portfolioJoueurCible = null; // null = propre portefeuille
 
@@ -685,6 +797,7 @@ function chargerPortefeuille() {
 
     if (portfolioJoueurCible) {
         // Vue d'un autre joueur
+        if (!historiquePortefeuilleCharge) {
         if (titre) titre.innerText = `Portefeuille de ${portfolioJoueurCible}`;
         if (btnRetour) btnRetour.style.display = "inline-block";
         if (joueurSummary) joueurSummary.style.display = "flex";
@@ -707,7 +820,10 @@ function chargerPortefeuille() {
                 afficherHistorique(data.historique || []);
                 // Actifs
                 afficherActifs(data.actifs || []);
+                    historiquePortefeuilleCharge = true;
             });
+            chargerGraphiquePortefeuille(portfolioJoueurCible);
+        }
         return;
     }
 
@@ -718,18 +834,25 @@ function chargerPortefeuille() {
     if (histTable) histTable.style.display = "";
     if (sectionTrades) sectionTrades.style.display = "";
 
-    // Actifs
-    fetch("/api/portefeuille")
-        .then(res => res.json())
-        .then(data => afficherActifs(data.actifs || []));
+    // 1. Les positions ouvertes bougent avec le marché, on les refresh à chaque tick
+    fetch("/api/portefeuille").then(r => r.json()).then(portefeuille => {
+        afficherActifs(portefeuille.actifs || []);
+    }).catch(() => {});
 
-    // Historique journalier (propre portefeuille)
-    fetch("/api/portefeuille/historique")
-        .then(res => res.json())
-        .then(rows => afficherHistorique(rows));
-
-    // Historique des trades
-    chargerHistoriquesTrades();
+    // 2. Historique journalier (ne bouge qu'une fois/jour) et trades (bougent via actions du joueur)
+    // On évite de les redemander toutes les 65s inutilement !
+    if (!historiquePortefeuilleCharge) {
+        fetch("/api/portefeuille/historique").then(r => r.json()).then(historique => {
+            afficherHistorique(historique);
+            historiquePortefeuilleCharge = true;
+        }).catch(() => {});
+        chargerGraphiquePortefeuille(null);
+    }
+    
+    if (!historiqueTradesCharge) {
+        chargerHistoriquesTrades();
+        historiqueTradesCharge = true;
+    }
 }
 
 function afficherHistorique(rows) {
@@ -959,21 +1082,18 @@ function changerFenetre(periode) {
 function getCacheKey(symbol, periode) { return `${symbol}_${periode}`; }
 
 function chargerGraphique(symbol, periode, prevPeriode) {
-    const key = getCacheKey(symbol, periode);
     const isTransition = !!prevPeriode && prevPeriode !== periode;
     const zoomIn = isTransition &&
         PERIODE_ORDER.indexOf(periode) < PERIODE_ORDER.indexOf(prevPeriode);
 
-    // Fraction visible utilisée pour les animations (~ratio temporel, borné pour le visuel)
+    // Fraction visible utilisée pour les animations : ratio exact des fenêtres temporelles,
+    // plancher à 3% pour éviter de finir sur 1 seul point, pas de plafond artificiel
     const zoomRatio = (from, to) =>
-        Math.max(0.18, Math.min(0.65, PERIODE_SEC[to] / PERIODE_SEC[from]));
+        Math.max(0.03, PERIODE_SEC[to] / PERIODE_SEC[from]);
 
     if (!isTransition) {
-        fetch(`/api/historique?symbole=${symbol}&periode=${periode}`)
-            .then(r => r.json())
-            .then(data => {
-                cacheGraphique[key] = { labels: data.map(d => d.time), prices: data.map(d => d.price) };
-                const c = cacheGraphique[key];
+        obtenirHistorique(symbol, periode)
+            .then(c => {
                 if (!c.prices.length) return;
                 prixActuel = c.prices[c.prices.length - 1];
                 document.getElementById("detail-prix").innerText = formatDevise(prixActuel);
@@ -986,74 +1106,163 @@ function chargerGraphique(symbol, periode, prevPeriode) {
         return;
     }
 
-    if (zoomIn) {
-        // ── Zoom in : animation exit sur l'ancien chart + fetch en parallèle ──
-        const N = graphiqueActif ? graphiqueActif.data.labels.length : 0;
-        const targetMin = N > 0 ? Math.floor(N * (1 - zoomRatio(prevPeriode, periode))) : 0;
-
-        let animDone = false, fetchData = null;
-        const swap = () => {
-            if (!animDone || !fetchData) return;
-            graphiquePremierChargement = false;
-            dessinerGraphique(fetchData.labels, fetchData.prices, false);
-            prixActuel = fetchData.prices[fetchData.prices.length - 1];
+    // On récupère les bornes actuelles pour synchroniser la transition
+    const oldYMin = graphiqueActif?.scales?.y?.min ?? graphiqueActif?.options?.scales?.y?.min ?? 0;
+    const oldYMax = graphiqueActif?.scales?.y?.max ?? graphiqueActif?.options?.scales?.y?.max ?? 0;
+    const oldXMin = graphiqueActif?.options?.scales?.x?.min ?? 0;
+    
+    // Dans tous les cas (zoom in/out), on fetch d'abord pour connaître les futures bornes Y
+        obtenirHistorique(symbol, periode)
+            .then(c => {
+            if (!c.prices.length) return;
+            
+            prixActuel = c.prices[c.prices.length - 1];
             document.getElementById("detail-prix").innerText = formatDevise(prixActuel);
+            graphiquePremierChargement = false;
             majPreviewTrade();
-        };
 
-        if (graphiqueActif && N > 0) {
-            animerAxe(graphiqueActif, 0, targetMin, 375, 'inout', () => { animDone = true; swap(); });
-        } else {
-            animDone = true;
-        }
+            const newYBounds = calculerBornesY(c.prices);
 
-        fetch(`/api/historique?symbole=${symbol}&periode=${periode}`)
-            .then(r => r.json())
-            .then(data => {
-                cacheGraphique[key] = { labels: data.map(d => d.time), prices: data.map(d => d.price) };
-                const c = cacheGraphique[key];
-                if (c.prices.length) { fetchData = c; swap(); }
-            })
-            .catch(err => console.error("Erreur graphique:", err));
+            if (zoomIn) {
+                if (graphiqueActif) {
+                    const N_old = graphiqueActif.data.datasets[0].data.length;
+                    const targetXMin = Math.floor(N_old * (1 - zoomRatio(prevPeriode, periode)));
 
-    } else {
-        // ── Zoom out : fetch, puis animation enter (dezoom depuis la droite) ──
-        fetch(`/api/historique?symbole=${symbol}&periode=${periode}`)
-            .then(r => r.json())
-            .then(data => {
-                cacheGraphique[key] = { labels: data.map(d => d.time), prices: data.map(d => d.price) };
-                const c = cacheGraphique[key];
-                if (!c.prices.length) return;
-                prixActuel = c.prices[c.prices.length - 1];
-                document.getElementById("detail-prix").innerText = formatDevise(prixActuel);
-                graphiquePremierChargement = false;
-                // Démarre zoomed-in sur la droite (même portion que l'ancienne fenêtre)
-                const startMin = Math.floor(c.labels.length * (1 - zoomRatio(periode, prevPeriode)));
-                dessinerGraphique(c.labels, c.prices, false, startMin > 0 ? startMin : undefined);
-                if (graphiqueActif && startMin > 0)
-                    animerAxe(graphiqueActif, startMin, 0, 425, 'in', null);
-                majPreviewTrade();
-            })
-            .catch(err => console.error("Erreur graphique:", err));
-    }
+                    animerAxes(
+                        graphiqueActif,
+                        { xMin: oldXMin, yMin: oldYMin, yMax: oldYMax },
+                        { xMin: targetXMin, yMin: newYBounds.min, yMax: newYBounds.max },
+                        375, 'inout',
+                        () => {
+                            // Swap sans délai une fois l'ancien graph aligné
+                            dessinerGraphique(c.labels, c.prices, false);
+                        }
+                    );
+                } else {
+                    dessinerGraphique(c.labels, c.prices, false);
+                }
+            } else {
+                const startXMin = Math.floor(c.prices.length * (1 - zoomRatio(periode, prevPeriode)));
+
+                // Dessine le nouveau graph mais restreint sur l'ancienne fenêtre (X et Y)
+                dessinerGraphique(c.labels, c.prices, false, {
+                    xMin: startXMin > 0 ? startXMin : 0,
+                    yMin: oldYMin,
+                    yMax: oldYMax
+                });
+
+                if (graphiqueActif && startXMin > 0) {
+                    animerAxes(
+                        graphiqueActif,
+                        { xMin: startXMin, yMin: oldYMin, yMax: oldYMax },
+                        { xMin: 0, yMin: newYBounds.min, yMax: newYBounds.max },
+                        425, 'in',
+                        () => {
+                            delete graphiqueActif.options.scales.y.min;
+                            delete graphiqueActif.options.scales.y.max;
+                            graphiqueActif.update('none');
+                        }
+                    );
+                }
+            }
+        })
+        .catch(err => console.error("Erreur graphique:", err));
 }
 
-function dessinerGraphique(labels, prices, animate = false, xMinInitial = undefined) {
+function dessinerGraphique(labels, prices, animate = false, initialBounds = null) {
     const ctx = document.getElementById("graphique-actif").getContext("2d");
-    if (graphiqueActif) graphiqueActif.destroy();
 
     const isDark = document.body.classList.contains("dark");
     const curveColor = isDark ? "#6aa3ff" : "#1877f2";
     const fillColor  = isDark ? "rgba(106,163,255,0.15)" : "rgba(24,119,242,0.1)";
     const gridColor  = isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)";
+    const N = prices.length;
+    // Données en format {x, y} pour l'axe linéaire (accepte des valeurs min/max flottantes →
+    // animation frame-to-frame en sous-pixel, sans saccades discrètes)
+    const xyData = prices.map((p, i) => ({ x: i, y: p }));
+
+    const xMin = initialBounds?.xMin !== undefined ? initialBounds.xMin : 0;
+    const yMin = initialBounds?.yMin;
+    const yMax = initialBounds?.yMax;
+
+    const isMobile = window.innerWidth <= 700;
+    const paddingDroit = isMobile ? 22 : 35; // Plus léger sur mobile
+    const largeurAxeY = isMobile ? 50 : 65;  // On réduit la largeur de l'axe sur mobile
+    const nbLabelsX = isMobile ? 5 : 7;      // Homogénéise le nombre de labels X (7 sur PC, 5 sur mobile)
+
+    // Mise à jour en place quand aucune animation d'entrée n'est requise
+    if (graphiqueActif && !animate) {
+        graphiqueLabels = labels;
+        graphiqueActif.data.datasets[0].data = xyData;
+        graphiqueActif.data.datasets[0].borderColor = curveColor;
+        graphiqueActif.data.datasets[0].backgroundColor = fillColor;
+        graphiqueActif.options.scales.y.grid.color = gridColor;
+        graphiqueActif.options.scales.x.max = N - 1;
+        graphiqueActif.options.scales.x.min = xMin;
+        
+        if (!graphiqueActif.options.layout.padding) graphiqueActif.options.layout.padding = {};
+        graphiqueActif.options.layout.padding.right = paddingDroit;
+        graphiqueActif.options.scales.y.afterFit = (scale) => { scale.width = largeurAxeY; };
+        
+        if (yMin !== undefined && yMax !== undefined) {
+            graphiqueActif.options.scales.y.min = yMin;
+            graphiqueActif.options.scales.y.max = yMax;
+        } else {
+            delete graphiqueActif.options.scales.y.min;
+            delete graphiqueActif.options.scales.y.max;
+        }
+        graphiqueActif.update('none');
+        return;
+    }
+
+    if (graphiqueActif) graphiqueActif.destroy();
+    graphiqueLabels = labels;
+
+    const yScaleOptions = { 
+        position: 'left', // Remet l'axe à gauche
+        grace: "5%", 
+        grid: { color: gridColor, lineWidth: 0.5 },
+        afterFit: (scale) => {
+            scale.width = largeurAxeY; // Largeur fixe responsive
+        }
+    };
+    if (yMin !== undefined && yMax !== undefined) {
+        yScaleOptions.min = yMin;
+        yScaleOptions.max = yMax;
+    }
+
+    const crosshairPlugin = {
+        id: 'crosshair',
+        afterDraw: chart => {
+            if (chart.tooltip?._active?.length) {
+                const activePoint = chart.tooltip._active[0];
+                const ctx = chart.ctx;
+                const x = activePoint.element.x;
+                const y = activePoint.element.y;
+                const topY = chart.scales.y.top;
+                const bottomY = chart.scales.y.bottom;
+                const leftX = chart.scales.x.left;
+                const rightX = chart.scales.x.right;
+
+                ctx.save();
+                ctx.beginPath();
+                ctx.moveTo(x, topY); ctx.lineTo(x, bottomY); // Ligne verticale
+                ctx.moveTo(leftX, y); ctx.lineTo(rightX, y); // Ligne horizontale
+                ctx.lineWidth = 1;
+                ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.15)';
+                ctx.setLineDash([4, 4]);
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+    };
 
     graphiqueActif = new Chart(ctx, {
         type: "line",
         data: {
-            labels,
             datasets: [{
                 label: "Prix",
-                data: prices,
+                data: xyData,
                 borderColor: curveColor,
                 backgroundColor: fillColor,
                 borderWidth: isDark ? 2.5 : 2,
@@ -1064,18 +1273,57 @@ function dessinerGraphique(labels, prices, animate = false, xMinInitial = undefi
             }]
         },
         options: {
+            layout: {
+                padding: { right: paddingDroit } // Compense le poids visuel de l'axe gauche pour centrer la courbe
+            },
             animation: animate
                 ? { duration: 700, easing: "easeInOutQuart" }
                 : false,
             responsive: true,
             maintainAspectRatio: false,
             interaction: { mode: "index", intersect: false },
-            plugins: { legend: { display: false } },
+            plugins: { 
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: isDark ? 'rgba(30, 45, 61, 0.95)' : 'rgba(255, 255, 255, 0.95)',
+                    titleColor: isDark ? '#c9d1d9' : '#1c1e21',
+                    bodyColor: curveColor,
+                    borderColor: isDark ? '#3d4068' : '#e1e4e8',
+                    borderWidth: 1,
+                    padding: 12,
+                    displayColors: false,
+                    titleFont: { family: "'Share Tech Mono', monospace", size: 12 },
+                    bodyFont: { family: "'Share Tech Mono', monospace", size: 14, weight: 'bold' },
+                    callbacks: {
+                        title: (tooltipItems) => {
+                            const idx = Math.round(tooltipItems[0].parsed.x);
+                            return (idx >= 0 && idx < graphiqueLabels.length) ? graphiqueLabels[idx] : '';
+                        },
+                        label: (context) => { return formatNum(context.parsed.y) + ' $'; }
+                    }
+                }
+            },
             scales: {
-                x: { grid: { display: false }, ...(xMinInitial !== undefined ? { min: xMinInitial } : {}) },
-                y: { grace: "5%", grid: { color: gridColor, lineWidth: 0.5 } }
+                x: {
+                    type: 'linear',
+                    min: xMin,
+                    max: N - 1,
+                    grid: { display: false },
+                    ticks: {
+                        maxRotation: 35,
+                        minRotation: 35,
+                        count: nbLabelsX, // Force la répartition homogène exacte
+                        // Mappe les indices numériques vers les labels temporels
+                        callback: (value) => {
+                            const idx = Math.round(value);
+                            return (idx >= 0 && idx < graphiqueLabels.length) ? graphiqueLabels[idx] : '';
+                        }
+                    }
+                },
+                y: yScaleOptions
             }
-        }
+        },
+        plugins: [crosshairPlugin]
     });
 }
 
@@ -1218,6 +1466,16 @@ function confirmerTrade() {
             const msgBox = document.getElementById("trade-message");
             if (msgBox) { msgBox.innerText = `${data.message} ✅`; msgBox.style.color = "green"; }
             actualiserDashboard();
+            
+            // On reset les drapeaux pour forcer le rechargement de l'historique car un trade a été effectué
+            historiqueTradesCharge = false;
+            historiquePortefeuilleCharge = false;
+            
+            const tabPortefeuille = document.getElementById("tab-portefeuille");
+            if (tabPortefeuille && tabPortefeuille.style.display === "block" && !portfolioJoueurCible) {
+                chargerPortefeuille();
+            }
+
             setTimeout(() => fermerModalTrade(null), 1200);
         })
         .catch(err => {
@@ -1240,6 +1498,351 @@ function lierToucheEntree(idActuel, idSuivant) {
             e.preventDefault();
             document.getElementById(idSuivant).focus();
         }
+    });
+}
+
+function chargerClassementGraphique() {
+    fetch("/api/classement/chart")
+        .then(r => r.json())
+        .then(data => {
+            if (!data || !data.labels || data.labels.length === 0) return;
+            dessinerClassementGraphique(data.labels, data.datasets);
+        })
+        .catch(err => console.error("Erreur graphe classement:", err));
+}
+
+function dessinerClassementGraphique(labels, datasetsData) {
+    const ctx = document.getElementById("classement-chart").getContext("2d");
+    const isDark = document.body.classList.contains("dark");
+    const gridColor = isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)";
+    
+    classementLabels = labels;
+
+    const colors = isDark 
+        ? ["#4f8ef7", "#2ecc71", "#e74c3c", "#f39c12", "#9b59b6", "#1abc9c", "#e67e22", "#3498db", "#16a085", "#d35400"]
+        : ["#1877f2", "#27ae60", "#c0392b", "#d35400", "#8e44ad", "#16a085", "#e67e22", "#2980b9", "#1abc9c", "#c0392b"];
+
+    const chartDatasets = datasetsData.map((ds, i) => {
+        const color = colors[i % colors.length];
+        const xyData = ds.data.map((p, idx) => ({ x: idx, y: p }));
+        return {
+            label: ds.username,
+            data: xyData,
+            borderColor: color,
+            backgroundColor: 'transparent',
+            borderWidth: isDark ? 2.5 : 2,
+            pointRadius: 0,
+            pointHoverRadius: 6,
+            fill: false,
+            tension: 0.1
+        };
+    });
+
+    let yMin = Infinity, yMax = -Infinity;
+    datasetsData.forEach(ds => {
+        ds.data.forEach(v => {
+            if (v < yMin) yMin = v;
+            if (v > yMax) yMax = v;
+        });
+    });
+    const yPad = (yMax - yMin) * 0.05 || yMax * 0.05 || 1;
+    const finalYMin = yMin - yPad;
+    const finalYMax = yMax + yPad;
+
+    const N = labels.length;
+    const isMobile = window.innerWidth <= 700;
+    const paddingDroit = isMobile ? 22 : 35;
+    const largeurAxeY = isMobile ? 50 : 65;
+    const nbLabelsX = isMobile ? 5 : 7;
+
+    if (classementChart) {
+        classementChart.data.datasets = chartDatasets;
+        classementChart.options.scales.x.max = N - 1;
+        classementChart.options.scales.y.min = finalYMin;
+        classementChart.options.scales.y.max = finalYMax;
+        classementChart.options.scales.y.grid.color = gridColor;
+        classementChart.update('none');
+        return;
+    }
+
+    const crosshairPlugin = {
+        id: 'crosshair',
+        afterDraw: chart => {
+            if (chart.tooltip?._active?.length) {
+                const activePoint = chart.tooltip._active[0];
+                const ctx = chart.ctx;
+                const x = activePoint.element.x;
+                const topY = chart.scales.y.top;
+                const bottomY = chart.scales.y.bottom;
+
+                ctx.save();
+                ctx.beginPath();
+                ctx.moveTo(x, topY); ctx.lineTo(x, bottomY);
+                ctx.lineWidth = 1;
+                ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.15)';
+                ctx.setLineDash([4, 4]);
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+    };
+
+    classementChart = new Chart(ctx, {
+        type: "line",
+        data: { datasets: chartDatasets },
+        options: {
+            layout: { padding: { right: paddingDroit } },
+            animation: { duration: 700, easing: "easeInOutQuart" },
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            plugins: { 
+                legend: { 
+                    display: true, 
+                    position: 'top',
+                    labels: { 
+                        color: isDark ? '#c9d1d9' : '#1c1e21', 
+                        boxWidth: 12, 
+                        usePointStyle: true,
+                        generateLabels: (chart) => {
+                            const labels = Chart.defaults.plugins.legend.labels.generateLabels(chart);
+                            labels.forEach(lbl => { lbl.text = `#${lbl.datasetIndex + 1} ${lbl.text}`; });
+                            return labels;
+                        }
+                    }
+                },
+                tooltip: {
+                    enabled: false,
+                    external: function(context) {
+                        const {chart, tooltip} = context;
+                        let tooltipEl = chart.canvas.parentNode.querySelector('div.classement-tooltip');
+                        if (!tooltipEl) {
+                            tooltipEl = document.createElement('div');
+                            tooltipEl.className = 'classement-tooltip';
+                            tooltipEl.style.pointerEvents = 'none';
+                            tooltipEl.style.position = 'absolute';
+                            tooltipEl.style.transform = 'translate(-50%, -100%)';
+                            tooltipEl.style.transition = 'all .1s ease';
+                            tooltipEl.style.borderRadius = '6px';
+                            tooltipEl.style.padding = '12px';
+                            tooltipEl.style.fontFamily = "'Share Tech Mono', monospace";
+                            tooltipEl.style.zIndex = 100;
+                            chart.canvas.parentNode.appendChild(tooltipEl);
+                            chart.canvas.parentNode.style.position = 'relative';
+                        }
+                        
+                        const isDark = document.body.classList.contains('dark');
+                        tooltipEl.style.background = isDark ? 'rgba(30, 45, 61, 0.95)' : 'rgba(255, 255, 255, 0.95)';
+                        tooltipEl.style.color = isDark ? '#c9d1d9' : '#1c1e21';
+                        tooltipEl.style.border = '1px solid ' + (isDark ? '#3d4068' : '#e1e4e8');
+                        tooltipEl.style.boxShadow = isDark ? '0 4px 12px rgba(0,0,0,0.5)' : '0 4px 12px rgba(0,0,0,0.15)';
+
+                        if (tooltip.opacity === 0) {
+                            tooltipEl.style.opacity = 0;
+                            return;
+                        }
+
+                        if (tooltip.body) {
+                            const titleLines = tooltip.title || [];
+                            let innerHtml = '<div style="margin-bottom: 12px; font-size: 12px; color: ' + (isDark ? '#9fa3ba' : '#606770') + '; text-align: center; text-transform: uppercase; letter-spacing: 1px;">';
+                            titleLines.forEach(title => { innerHtml += title; });
+                            innerHtml += '</div><div style="display: flex; flex-direction: column; gap: 8px;">';
+
+                            const dataPoints = tooltip.dataPoints;
+                            // Trier par valeur décroissante pour afficher le plus riche en haut
+                            const sortedPoints = [...dataPoints].sort((a, b) => b.parsed.y - a.parsed.y);
+
+                            sortedPoints.forEach((dp) => {
+                                const color = dp.dataset.borderColor;
+                                const username = dp.dataset.label;
+                                const val = formatNum(dp.parsed.y) + ' $';
+                                const bgColor = color + '26'; // Ajoute 15% d'opacité à la couleur hexadécimale
+
+                                innerHtml += `
+                                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 24px;">
+                                        <span style="background: ${bgColor}; color: ${color}; border: 1px solid ${color}40; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; letter-spacing: 0.5px;">
+                                            ${username}
+                                        </span>
+                                        <span style="font-size: 14px; font-weight: bold; font-family: 'Courier New', monospace;">${val}</span>
+                                    </div>
+                                `;
+                            });
+                            innerHtml += '</div>';
+                            tooltipEl.innerHTML = innerHtml;
+                        }
+
+                        const {offsetLeft: positionX, offsetTop: positionY} = chart.canvas;
+                        const tooltipWidth = tooltipEl.offsetWidth;
+                        const chartWidth = chart.canvas.offsetWidth;
+                        
+                        let left = tooltip.caretX;
+                        if (left < tooltipWidth / 2) left = tooltipWidth / 2;
+                        if (left > chartWidth - tooltipWidth / 2) left = chartWidth - tooltipWidth / 2;
+
+                        tooltipEl.style.opacity = 1;
+                        tooltipEl.style.left = positionX + left + 'px';
+                        
+                        // Éviter que l'infobulle ne sorte par le haut
+                        let top = positionY + tooltip.caretY - 12;
+                        if (top - tooltipEl.offsetHeight < 0) {
+                            tooltipEl.style.transform = 'translate(-50%, 0)';
+                            top = positionY + tooltip.caretY + 12;
+                        } else {
+                            tooltipEl.style.transform = 'translate(-50%, -100%)';
+                        }
+                        tooltipEl.style.top = top + 'px';
+                    },
+                    callbacks: {
+                        title: (tooltipItems) => {
+                            const idx = Math.round(tooltipItems[0].parsed.x);
+                            return (idx >= 0 && idx < classementLabels.length) ? classementLabels[idx] : '';
+                        },
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    type: 'linear', min: 0, max: N - 1, grid: { display: false },
+                    ticks: { maxRotation: 35, minRotation: 35, count: nbLabelsX,
+                        callback: (value) => {
+                            const idx = Math.round(value);
+                            return (idx >= 0 && idx < classementLabels.length) ? classementLabels[idx] : '';
+                        }
+                    }
+                },
+                y: {
+                    position: 'left', grace: "5%", min: finalYMin, max: finalYMax,
+                    grid: { color: gridColor, lineWidth: 0.5 },
+                    afterFit: (scale) => { scale.width = largeurAxeY; }
+                }
+            }
+        },
+        plugins: [crosshairPlugin]
+    });
+}
+
+function chargerGraphiquePortefeuille(username) {
+    const url = username ? `/api/portefeuille/chart?username=${encodeURIComponent(username)}` : `/api/portefeuille/chart`;
+    fetch(url)
+        .then(r => r.json())
+        .then(data => {
+            if (!data || !data.length) return;
+            const labels = data.map(d => d.time);
+            const prices = data.map(d => d.price);
+            dessinerGraphiquePortefeuille(labels, prices);
+        })
+        .catch(err => console.error("Erreur graphe portf:", err));
+}
+
+function dessinerGraphiquePortefeuille(labels, prices) {
+    const ctx = document.getElementById("portfolio-chart").getContext("2d");
+    const isDark = document.body.classList.contains("dark");
+    
+    const startPrice = prices[0] || 100000;
+    const currentPrice = prices[prices.length - 1] || 100000;
+    const isPos = currentPrice >= startPrice;
+
+    // Vert si bénéfice global, rouge si perte !
+    const curveColor = isPos ? (isDark ? "#2ecc71" : "#27ae60") : (isDark ? "#e74c3c" : "#c0392b");
+    const fillColor  = isPos ? "rgba(46,204,113,0.15)" : "rgba(231,76,60,0.15)";
+    const gridColor  = isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)";
+    
+    const N = prices.length;
+    const xyData = prices.map((p, i) => ({ x: i, y: p }));
+
+    const isMobile = window.innerWidth <= 700;
+    const paddingDroit = isMobile ? 22 : 35;
+    const largeurAxeY = isMobile ? 50 : 65;
+    const nbLabelsX = isMobile ? 5 : 7;
+
+    const bounds = calculerBornesY(prices);
+
+    if (portfolioChart) portfolioChart.destroy();
+
+    const crosshairPlugin = {
+        id: 'crosshair',
+        afterDraw: chart => {
+            if (chart.tooltip?._active?.length) {
+                const activePoint = chart.tooltip._active[0];
+                const ctx = chart.ctx;
+                const x = activePoint.element.x;
+                const y = activePoint.element.y;
+                const topY = chart.scales.y.top;
+                const bottomY = chart.scales.y.bottom;
+                const leftX = chart.scales.x.left;
+                const rightX = chart.scales.x.right;
+
+                ctx.save();
+                ctx.beginPath();
+                ctx.moveTo(x, topY); ctx.lineTo(x, bottomY);
+                ctx.moveTo(leftX, y); ctx.lineTo(rightX, y);
+                ctx.lineWidth = 1;
+                ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.15)';
+                ctx.setLineDash([4, 4]);
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+    };
+
+    portfolioChart = new Chart(ctx, {
+        type: "line",
+        data: {
+            datasets: [{
+                label: "Valeur",
+                data: xyData,
+                borderColor: curveColor,
+                backgroundColor: fillColor,
+                borderWidth: isDark ? 2.5 : 2,
+                pointRadius: 0,
+                pointHoverRadius: 6,
+                fill: true,
+                tension: 0.1
+            }]
+        },
+        options: {
+            layout: { padding: { right: paddingDroit } },
+            animation: { duration: 700, easing: "easeInOutQuart" },
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            plugins: { 
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: isDark ? 'rgba(30, 45, 61, 0.95)' : 'rgba(255, 255, 255, 0.95)',
+                    titleColor: isDark ? '#c9d1d9' : '#1c1e21',
+                    bodyColor: curveColor,
+                    borderColor: isDark ? '#3d4068' : '#e1e4e8',
+                    borderWidth: 1, padding: 12, displayColors: false,
+                    titleFont: { family: "'Share Tech Mono', monospace", size: 12 },
+                    bodyFont: { family: "'Share Tech Mono', monospace", size: 14, weight: 'bold' },
+                    callbacks: {
+                        title: (tooltipItems) => {
+                            const idx = Math.round(tooltipItems[0].parsed.x);
+                            return (idx >= 0 && idx < labels.length) ? labels[idx] : '';
+                        },
+                        label: (context) => { return formatNum(context.parsed.y) + ' $'; }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    type: 'linear', min: 0, max: N - 1, grid: { display: false },
+                    ticks: { maxRotation: 35, minRotation: 35, count: nbLabelsX,
+                        callback: (value) => {
+                            const idx = Math.round(value);
+                            return (idx >= 0 && idx < labels.length) ? labels[idx] : '';
+                        }
+                    }
+                },
+                y: {
+                    position: 'left', grace: "5%", min: bounds.min, max: bounds.max,
+                    grid: { color: gridColor, lineWidth: 0.5 },
+                    afterFit: (scale) => { scale.width = largeurAxeY; }
+                }
+            }
+        },
+        plugins: [crosshairPlugin]
     });
 }
 

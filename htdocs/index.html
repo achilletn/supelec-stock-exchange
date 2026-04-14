@@ -71,6 +71,13 @@
             </div>
         </nav>
 
+        <!-- Bandeau défilant (Ticker) -->
+        <div class="ticker-wrap" id="market-ticker-wrap">
+            <div class="ticker-content" id="ticker-content">
+                <!-- Rempli par le JS -->
+            </div>
+        </div>
+
         <div class="user-dashboard-header">
             <div class="dash-item">
                 <span class="dash-label">👤 TRADER</span>
@@ -144,7 +151,16 @@
                         <span class="status-ok">Synchronisation</span>
                     </div>
                 </div>
-                <div class="table-scroll">
+
+            <div class="actif-toggle-bar" style="justify-content: flex-start; margin-bottom: 15px;">
+                <div class="actif-display-toggle" id="toggle-classement-vue" onclick="toggleAffichageClassement()">
+                    <div class="adt-thumb"></div>
+                    <span class="toggle-sym-btn">Tableau</span>
+                    <span class="toggle-nom-btn">Graphe</span>
+                </div>
+            </div>
+
+            <div id="classement-table-container" class="table-scroll">
                 <table class="market-table">
                     <thead>
                         <tr>
@@ -158,6 +174,10 @@
                     <tbody id="leaderboard-body"></tbody>
                 </table>
                 </div>
+
+            <div id="classement-graph-container" style="display:none; width: 100%; height: 400px; margin: 15px 0;">
+                <canvas id="classement-chart"></canvas>
+            </div>
             </section>
 
             <section id="tab-portefeuille" class="tab-content" style="display:none;">
@@ -183,6 +203,12 @@
                     </div>
                 </div>
                 <div class="perf-journalieres-card">
+                    <div class="section-separator">
+                        <span>Évolution du portefeuille</span>
+                    </div>
+                    <div id="portfolio-chart-wrapper" style="width: 100%; height: 250px; margin: 15px 0;">
+                        <canvas id="portfolio-chart"></canvas>
+                    </div>
                     <div class="section-separator">
                         <span>Performances journalières</span>
                     </div>
